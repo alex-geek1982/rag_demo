@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-engine-llamaindex"
+version = "0.1.0"
+description = "An all-in-one multimodal RAG engine built on LLamaIndex"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "RAG Engine", email = "dev@ragenigne.com"}
+]
+keywords = ["RAG", "LLamaIndex", "multimodal", "retrieval", "knowledge-graph"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "llama-index>=0.9.0",
+    "llama-index-core>=0.1.0",
+    "llama-index-embeddings-openai>=0.1.0",
+    "llama-index-llms-openai>=0.1.0",
+    "llama-index-vector-stores-chroma>=0.4.0",
+    "chromadb>=1.0.0",
+    "kuzu>=0.11.0",
+    "openai>=1.0.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0.0",
+    "PyPDF2>=3.0.0",
+    "pdfplumber>=0.11.0",
+    "python-docx>=0.8.11",
+    "openpyxl>=3.1.0",
+    "pandas>=2.0.0",
+    "pillow>=10.0.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "typing-extensions>=4.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.7.0",
+    "isort>=5.12.0",
+    "mypy>=1.4.1",
+    "ruff>=0.0.285",
+]
+docs = [
+    "sphinx>=7.0",
+    "sphinx-rtd-theme>=1.3.0",
+]
+vision = [
+    "transformers>=4.30.0",
+    "torch>=2.0.0",
+]
+
+[tool.setuptools]
+packages = ["rag_engine", "rag_engine.core", "rag_engine.parsers", "rag_engine.processors", "rag_engine.retrieval", "rag_engine.i18n"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.10"

@@ -1,0 +1,31 @@
+# Core dependencies
+llama-index>=0.9.0
+llama-index-core>=0.1.0
+llama-index-embeddings-openai>=0.1.0
+llama-index-llms-openai>=0.1.0
+llama-index-vector-stores-chroma>=0.4.0
+chromadb>=1.0.0
+kuzu>=0.11.0
+openai>=1.0.0
+numpy>=1.26.0
+
+# Data processing
+pydantic>=2.0
+python-dotenv>=1.0.0
+PyPDF2>=3.0.0
+pdfplumber>=0.11.0
+python-docx>=0.8.11
+openpyxl>=3.1.0
+pandas>=2.0.0
+pillow>=10.0.0
+pyyaml>=6.0
+networkx>=3.0
+
+# Networking
+requests>=2.31.0
+typing-extensions>=4.8.0
+
+# Optional vision support (uncomment if needed)
+# transformers>=4.30.0
+# torch>=2.0.0
+# torchvision>=0.15.0
