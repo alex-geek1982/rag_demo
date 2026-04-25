@@ -10,6 +10,11 @@ from .reranker import (
     HybridReranker,
 )
 from .context_extractor import ContextExtractor, ContextConfig, ContextCache
+from .bm25_retriever import (
+    BM25Retriever,
+    ScoreNormalizer,
+    HybridFuser,
+)
 
 __all__ = [
     "EmbeddingProvider",
@@ -23,4 +28,7 @@ __all__ = [
     "ContextExtractor",
     "ContextConfig",
     "ContextCache",
+    "BM25Retriever",
+    "ScoreNormalizer",
+    "HybridFuser",
 ]

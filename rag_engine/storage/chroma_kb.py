@@ -3,8 +3,10 @@ Chroma Vector Knowledge Base - Isolated vector database operations
 """
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
+import pickle
+import json
 
 from ..types import RetrievalResult, ContentType
 
@@ -13,6 +15,7 @@ logger = logging.getLogger(__name__)
 COLLECTION_NAME = "jd_order_prd"
 ENTITIES_COLLECTION_NAME = "entities"
 
+
 class ChromaKnowledgeBase:
     """
     Chroma-based vector knowledge base for semantic search.
@@ -20,11 +23,11 @@ class ChromaKnowledgeBase:
     Responsibilities:
     - Persist and manage vector embeddings
     - Provide semantic search capabilities
+    - Support BM25 full-text search
     - Independent rebuild from content blocks
     
     This class is completely decoupled from RAGEngine and other components.
     """
-
 
     def __init__(self, db_path: Path):
         """
@@ -33,14 +36,20 @@ class ChromaKnowledgeBase:
         Args:
             db_path: Path to persistent Chroma database
         """
-        self.db_path = db_path
+        self.db_path = Path(db_path)
+        self.db_path.mkdir(parents=True, exist_ok=True)
+        
         try:
             import chromadb
-            self.client = chromadb.PersistentClient(path=str(db_path))
+            self.client = chromadb.PersistentClient(path=str(self.db_path))
             self.collection = None
         except ImportError:
             logger.error("chromadb not installed. Install with: pip install chromadb")
             raise
+        
+        # BM25 support
+        self.bm25_retriever = None
+        self._init_bm25_from_disk()
 
     def get_or_create_collection(self, name: str = COLLECTION_NAME) -> Any:
         """
@@ -57,6 +66,33 @@ class ChromaKnowledgeBase:
             metadata={"hnsw:space": "cosine"},
         )
         return self.collection
+
+    def _init_bm25_from_disk(self) -> None:
+        """Load BM25 retriever from disk if available."""
+        try:
+            bm25_path = self.db_path / "bm25_index.pkl"
+            if bm25_path.exists():
+                with open(bm25_path, 'rb') as f:
+                    self.bm25_retriever = pickle.load(f)
+                logger.info("BM25 index loaded from disk")
+            else:
+                logger.debug("No BM25 index found on disk")
+        except Exception as e:
+            logger.warning(f"Failed to load BM25 index: {e}")
+            self.bm25_retriever = None
+
+    def _save_bm25_to_disk(self) -> None:
+        """Save BM25 retriever to disk for persistent caching."""
+        if self.bm25_retriever is None:
+            return
+        
+        try:
+            bm25_path = self.db_path / "bm25_index.pkl"
+            with open(bm25_path, 'wb') as f:
+                pickle.dump(self.bm25_retriever, f)
+            logger.debug("BM25 index saved to disk")
+        except Exception as e:
+            logger.warning(f"Failed to save BM25 index: {e}")
 
     def get_or_create_entities_collection(self) -> Any:
         """
@@ -76,6 +112,7 @@ class ChromaKnowledgeBase:
         Rebuild knowledge base from content blocks and pre-calculated embeddings.
         
         This is a stateless operation that can be called independently.
+        Also rebuilds BM25 index for full-text search.
         
         Args:
             chunks: Dict mapping chunk_id -> Chunk
@@ -96,14 +133,18 @@ class ChromaKnowledgeBase:
             documents: List[str] = []
             metadatas: List[Dict[str, Any]] = []
             embedding_list: List[List[float]] = []
-
+            bm25_docs: List[str] = []
+            
             for chunk_id, chunk in chunks.items():
                 vector = embeddings.get(chunk_id)
                 if vector is None:
                     raise RuntimeError(f"No embedding found for chunk {chunk_id}")
 
                 ids.append(chunk_id)
-                documents.append(chunk.text)
+                doc_text = chunk.text
+                documents.append(doc_text)
+                bm25_docs.append(doc_text)
+                
                 embedding_list.append(np.asarray(vector, dtype=float).tolist())
                 metadatas.append({
                     "content_type": chunk.type.value if hasattr(chunk, 'type') else chunk.chunk_type,
@@ -121,10 +162,44 @@ class ChromaKnowledgeBase:
                 embeddings=embedding_list,
                 metadatas=metadatas,
             )
+            
+            # Build BM25 index
+            self._rebuild_bm25_index(bm25_docs, ids)
+            
+            logger.info(f"Chroma collection rebuilt with {len(ids)} chunks and BM25 indexed")
 
         except Exception as e:
             logger.error(f"Failed to rebuild collection: {e}")
             raise
+
+    def _rebuild_bm25_index(self, documents: List[str], doc_ids: List[str]) -> None:
+        """
+        Rebuild BM25 index.
+        
+        Args:
+            documents: List of document texts
+            doc_ids: Corresponding document IDs
+        """
+        try:
+            from .bm25_retriever import BM25Retriever
+            from ..config import BM25Config
+            
+            config = BM25Config()
+            self.bm25_retriever = BM25Retriever(config, documents)
+            
+            # Store ID mapping for retrieval
+            self.bm25_doc_ids = doc_ids
+            
+            # Save to disk
+            self._save_bm25_to_disk()
+            
+            logger.info(f"BM25 index built for {len(documents)} documents")
+        except ImportError as e:
+            logger.warning(f"BM25 module not available: {e}")
+            self.bm25_retriever = None
+        except Exception as e:
+            logger.error(f"Failed to build BM25 index: {e}")
+            self.bm25_retriever = None
 
     def rebuild_entities(self, entities: Dict[str, Any], embeddings: Dict[str, List[float]]) -> None:
         """
@@ -233,6 +308,75 @@ class ChromaKnowledgeBase:
 
         except Exception as e:
             logger.error(f"Chroma search failed: {e}")
+            return []
+
+    def search_bm25(self, query: str, top_k: int = 6) -> List[RetrievalResult]:
+        """
+        Search for relevant content using BM25 full-text search.
+        
+        Args:
+            query: Query text
+            top_k: Number of results to return
+            
+        Returns:
+            List of retrieval results ranked by BM25 score
+        """
+        if self.bm25_retriever is None:
+            logger.warning("BM25 index not initialized, cannot perform BM25 search")
+            return []
+        
+        try:
+            # Get BM25 search results
+            ranked_results = self.bm25_retriever.search(query, top_k=top_k)
+            
+            if not ranked_results:
+                return []
+            
+            results: List[RetrievalResult] = []
+            
+            # Get the original documents from Chroma
+            if self.collection is None:
+                self.get_or_create_collection()
+            
+            # Map result indices to document IDs and retrieve from Chroma
+            for doc_idx, bm25_score in ranked_results:
+                if doc_idx >= len(self.bm25_doc_ids):
+                    continue
+                
+                doc_id = self.bm25_doc_ids[doc_idx]
+                
+                # Get document from Chroma
+                try:
+                    data = self.collection.get(ids=[doc_id])
+                    if data and data.get("documents"):
+                        doc_text = data["documents"][0]
+                        metadata = data.get("metadatas", [{}])[0] if data.get("metadatas") else {}
+                        
+                        # Normalize BM25 score to [0, 1]
+                        # BM25 scores are typically in range [0, inf), we normalize them
+                        normalized_score = min(1.0, bm25_score / (bm25_score + 1.0))
+                        
+                        results.append(
+                            RetrievalResult(
+                                doc_id=doc_id,
+                                score=normalized_score,
+                                content=doc_text,
+                                content_type=ContentType(metadata.get("content_type", "text")),
+                                metadata={
+                                    **metadata,
+                                    "retrieval_channel": "bm25/chroma",
+                                    "bm25_raw_score": float(bm25_score),
+                                },
+                            )
+                        )
+                except Exception as e:
+                    logger.debug(f"Failed to retrieve document {doc_id}: {e}")
+                    continue
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"BM25 search failed: {e}")
             return []
 
     def count(self) -> int:

@@ -114,6 +114,52 @@ class ProcessingConfig:
 
 
 @dataclass
+class BM25Config:
+    """BM25 full-text search configuration"""
+    enable_bm25: bool = os.getenv("ENABLE_BM25", "true").lower() == "true"
+    k1: float = float(os.getenv("BM25_K1", "1.5"))  # Saturation parameter
+    b: float = float(os.getenv("BM25_B", "0.75"))  # Document length normalization
+    min_token_length: int = int(os.getenv("BM25_MIN_TOKEN_LENGTH", "2"))  # Min token length for indexing
+    language: str = os.getenv("BM25_LANGUAGE", "english")  # For stemming/tokenization
+
+
+@dataclass
+class HybridRetrievalConfig:
+    """Hybrid retrieval fusion configuration"""
+    # Fusion strategy: 'weighted_avg', 'rrf', 'max', 'min'
+    fusion_strategy: str = os.getenv("FUSION_STRATEGY", "weighted_avg")
+    
+    # Weights for different retrieval methods (sum should be 1.0)
+    vector_weight: float = float(os.getenv("VECTOR_WEIGHT", "0.5"))
+    bm25_weight: float = float(os.getenv("BM25_WEIGHT", "0.5"))
+    graph_weight: float = float(os.getenv("GRAPH_WEIGHT", "0.0"))  # Optional graph weight
+    
+    # Score normalization method: 'minmax', 'sigmoid', 'rank'
+    normalization_method: str = os.getenv("NORMALIZATION_METHOD", "minmax")
+    
+    # RRF (Reciprocal Rank Fusion) parameter
+    rrf_k: float = float(os.getenv("RRF_K", "60.0"))
+    
+    # For rank-based normalization
+    rank_offset: float = float(os.getenv("RANK_OFFSET", "1.0"))
+    
+    # Deduplication: merge results from different sources by doc_id
+    enable_dedup: bool = os.getenv("ENABLE_DEDUP", "true").lower() == "true"
+    dedup_threshold: float = float(os.getenv("DEDUP_THRESHOLD", "0.95"))  # Similarity threshold
+    
+    def __post_init__(self):
+        """Validate weights sum to 1.0"""
+        total_weight = self.vector_weight + self.bm25_weight + self.graph_weight
+        if total_weight > 0 and abs(total_weight - 1.0) > 0.01:
+            logger_msg = f"Warning: Weights sum to {total_weight}, not 1.0. Normalizing automatically."
+            # Auto-normalize
+            if total_weight > 0:
+                self.vector_weight /= total_weight
+                self.bm25_weight /= total_weight
+                self.graph_weight /= total_weight
+
+
+@dataclass
 class RerankerConfig:
     """Reranker configuration for result re-ranking"""
     enable_rerank: bool = os.getenv("ENABLE_RERANK", "true").lower() == "true"
@@ -157,6 +203,8 @@ class RAGEngineConfig:
     language: LanguageConfig = field(default_factory=LanguageConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     pdf_processing: PDFProcessingConfig = field(default_factory=PDFProcessingConfig)
+    bm25: BM25Config = field(default_factory=BM25Config)
+    hybrid_retrieval: HybridRetrievalConfig = field(default_factory=HybridRetrievalConfig)
     reranker: RerankerConfig = field(default_factory=RerankerConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     

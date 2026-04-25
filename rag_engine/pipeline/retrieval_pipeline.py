@@ -5,13 +5,14 @@ Retrieval Pipeline - Unified retrieval, reranking, and answer generation
 import logging
 import re
 import requests
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
 
 from rag_engine.core.prompts import ENTITY_EXTRACTION_USER_PROMPT
 
 from ..config import RAGEngineConfig
 from ..retrieval import OpenAIEmbedding
+from ..retrieval.bm25_retriever import HybridFuser
 from ..types import RetrievalResult, ContentBlock, Entity, ContentType
 from ..storage import ChromaKnowledgeBase, KuzuGraphStore
 
@@ -289,9 +290,15 @@ class RetrievalPipeline:
         chroma_kb: ChromaKnowledgeBase,
         kuzu_store: KuzuGraphStore,
         top_k: int = 5,
-    ) -> List[RetrievalResult]:
+    ) -> Tuple[List[RetrievalResult], List[RetrievalResult]]:
         """
-        Perform hybrid retrieval combining vector and graph search.
+        Perform hybrid retrieval combining vector, BM25, and graph search.
+        
+        Workflow:
+        1. Vector search for semantic similarity
+        2. BM25 search for exact/keyword matching
+        3. Entity and graph search for relationship data
+        4. Fuse results using configurable weights
 
         Args:
             query: Query string
@@ -300,20 +307,77 @@ class RetrievalPipeline:
             top_k: Number of results to return
 
         Returns:
-            Merged and sorted results
+            Tuple of (fused_results, graph_results)
+            - fused_results: Merged vector + BM25 results using weighted fusion
+            - graph_results: Graph-based relationship data
         """
-        # Vector search
-        query_vector = self.embedding_provider.embed_text_sync([query])[0].tolist()
-        vector_results = chroma_kb.search(query_vector, top_k=max(top_k * 2, 6))
+        try:
+            # ========== Vector Search ==========
+            logger.info(f"[Hybrid Retrieval] Running vector search for query: {query[:50]}...")
+            query_vector = self.embedding_provider.embed_text_sync([query])[0].tolist()
+            vector_results = chroma_kb.search(query_vector, top_k=max(top_k * 2, 6))
+            logger.debug(f"  Vector search returned {len(vector_results)} results")
+            
+            # ========== BM25 Search ==========
+            bm25_results = []
+            if self.config.bm25.enable_bm25 and chroma_kb.bm25_retriever is not None:
+                logger.info(f"[Hybrid Retrieval] Running BM25 search...")
+                bm25_results = chroma_kb.search_bm25(query, top_k=max(top_k * 2, 6))
+                logger.debug(f"  BM25 search returned {len(bm25_results)} results")
+            else:
+                logger.debug("BM25 search disabled or not initialized")
+            
+            # ========== Weighted Fusion ==========
+            logger.info(f"[Hybrid Retrieval] Fusing vector and BM25 results...")
+            fused_results = self._fuse_results(vector_results, bm25_results, top_k)
+            logger.info(f"  Fusion complete: {len(fused_results)} results after deduplication and fusion")
+            
+            # ========== Entity Search ==========
+            entity_results = chroma_kb.search_entities(query_vector, top_k=max(top_k, 3))
+            logger.debug(f"  Entity search returned {len(entity_results)} results")
 
-        # Entity search
-        entity_results = chroma_kb.search_entities(query_vector, top_k=max(top_k, 3))
+            # ========== Graph Search ==========
+            graph_search_result = await kuzu_store.search(entity_results, top_k=max(2, top_k))
+            graph_results = self._convert_graph_results_to_retrieval_results(graph_search_result)
+            logger.debug(f"  Graph search returned {len(graph_results)} results")
 
-        # Graph search - use entity_results to limit relationship retrieval scope
-        graph_search_result = await kuzu_store.search(entity_results, top_k=max(2, top_k))
-        graph_results = self._convert_graph_results_to_retrieval_results(graph_search_result)
+            return fused_results, graph_results
+            
+        except Exception as e:
+            logger.error(f"Hybrid retrieval failed: {e}", exc_info=True)
+            return [], []
 
-        return vector_results, graph_results
+    def _fuse_results(
+        self,
+        vector_results: List[RetrievalResult],
+        bm25_results: List[RetrievalResult],
+        top_k: int = 5
+    ) -> List[RetrievalResult]:
+        """
+        Fuse vector and BM25 results using HybridFuser.
+        
+        Args:
+            vector_results: Results from vector search
+            bm25_results: Results from BM25 search
+            top_k: Number of final results to return
+            
+        Returns:
+            Fused results
+        """
+        try:
+            fuser = HybridFuser(self.config.hybrid_retrieval)
+            fused = fuser.fuse(
+                vector_results=vector_results,
+                bm25_results=bm25_results,
+                graph_results=[],  # Graph results handled separately
+                top_k=top_k
+            )
+            return fused
+        except Exception as e:
+            logger.error(f"Result fusion failed: {e}", exc_info=True)
+            # Fallback: combine and sort by score
+            combined = vector_results + bm25_results
+            return sorted(combined, key=lambda x: x.score, reverse=True)[:top_k]
 
     @staticmethod
     def _convert_graph_results_to_retrieval_results(
