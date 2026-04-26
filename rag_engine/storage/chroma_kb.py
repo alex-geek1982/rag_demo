@@ -49,6 +49,7 @@ class ChromaKnowledgeBase:
         
         # BM25 support
         self.bm25_retriever = None
+        self.bm25_doc_ids: List[str] = []
         self._init_bm25_from_disk()
 
     def get_or_create_collection(self, name: str = COLLECTION_NAME) -> Any:
@@ -68,28 +69,37 @@ class ChromaKnowledgeBase:
         return self.collection
 
     def _init_bm25_from_disk(self) -> None:
-        """Load BM25 retriever from disk if available."""
+        """Load BM25 retriever and id mapping from disk if available."""
         try:
             bm25_path = self.db_path / "bm25_index.pkl"
             if bm25_path.exists():
                 with open(bm25_path, 'rb') as f:
-                    self.bm25_retriever = pickle.load(f)
+                    payload = pickle.load(f)
+                if isinstance(payload, dict):
+                    self.bm25_retriever = payload.get('bm25_retriever')
+                    self.bm25_doc_ids = payload.get('bm25_doc_ids', [])
+                else:
+                    self.bm25_retriever = payload
                 logger.info("BM25 index loaded from disk")
             else:
                 logger.debug("No BM25 index found on disk")
         except Exception as e:
             logger.warning(f"Failed to load BM25 index: {e}")
             self.bm25_retriever = None
+            self.bm25_doc_ids = []
 
     def _save_bm25_to_disk(self) -> None:
-        """Save BM25 retriever to disk for persistent caching."""
+        """Save BM25 retriever and id mapping to disk for persistent caching."""
         if self.bm25_retriever is None:
             return
         
         try:
             bm25_path = self.db_path / "bm25_index.pkl"
             with open(bm25_path, 'wb') as f:
-                pickle.dump(self.bm25_retriever, f)
+                pickle.dump({
+                    'bm25_retriever': self.bm25_retriever,
+                    'bm25_doc_ids': self.bm25_doc_ids,
+                }, f)
             logger.debug("BM25 index saved to disk")
         except Exception as e:
             logger.warning(f"Failed to save BM25 index: {e}")
@@ -181,7 +191,7 @@ class ChromaKnowledgeBase:
             doc_ids: Corresponding document IDs
         """
         try:
-            from .bm25_retriever import BM25Retriever
+            from ..retrieval.bm25_retriever import BM25Retriever
             from ..config import BM25Config
             
             config = BM25Config()
@@ -197,9 +207,34 @@ class ChromaKnowledgeBase:
         except ImportError as e:
             logger.warning(f"BM25 module not available: {e}")
             self.bm25_retriever = None
+            self.bm25_doc_ids = []
+            raise
         except Exception as e:
             logger.error(f"Failed to build BM25 index: {e}")
             self.bm25_retriever = None
+            self.bm25_doc_ids = []
+            raise
+
+    def build_bm25_index_from_chroma(self, name: str = COLLECTION_NAME) -> None:
+        """
+        Build BM25 index from the existing Chroma collection.
+        
+        Args:
+            name: Chroma collection name
+        """
+        data = self.get_all(name)
+        if not data:
+            logger.warning("No Chroma data available to build BM25 index")
+            raise RuntimeError("No Chroma data available to build BM25 index")
+
+        ids = data.get("ids", [])
+        documents = data.get("documents", [])
+
+        if not ids or not documents:
+            logger.warning("Chroma collection is empty; cannot build BM25 index")
+            raise RuntimeError("Chroma collection is empty; cannot build BM25 index")
+
+        self._rebuild_bm25_index(documents, ids)
 
     def rebuild_entities(self, entities: Dict[str, Any], embeddings: Dict[str, List[float]]) -> None:
         """

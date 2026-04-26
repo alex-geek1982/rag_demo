@@ -5,9 +5,10 @@
 1. 使用 `rag_engine.pipeline` 模块解析 PDF 并构建知识库和知识图谱
 2. 使用 `rag_engine.storage.ChromaKnowledgeBase` 进行向量存储 (完全独立)
 3. 使用 `rag_engine.storage.KuzuGraphStore` 进行图存储 (完全独立)
-4. 支持三个独立的工作流：
+4. 支持四个独立的工作流：
    - UPDATE_KB: 文档处理 + 知识库构建（生成向量和 Chroma 索引）
    - UPDATE_KG: 从 Chroma 查询所有数据 + 构建知识图谱（独立执行，无需 engine）
+   - BUILD_BM25: 从 Chroma 数据构建 BM25 索引并保存索引文件
    - EXECUTE_QUERY: 初始化 retriever + 执行查询（目前还有一些向后兼容的依赖，后续可进一步解耦）
 
 运行方式（PowerShell）：
@@ -66,6 +67,7 @@ DEEPBRICKS_API_KEY = os.getenv("DEEPBRICKS_API_KEY", "sk-F4x4h7mc8GjjURTPcxGMXnu
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 UPDATE_KB = os.getenv("UPDATE_KB", "false").strip().lower() == "true"
 UPDATE_KG = os.getenv("UPDATE_KG", "false").strip().lower() == "true"
+BUILD_BM25 = os.getenv("BUILD_BM25", "false").strip().lower() == "true"
 EXECUTE_QUERY = os.getenv("EXECUTE_QUERY", "true").strip().lower() == "true"
 MARKDOWN_PATH = os.getenv("MARKDOWN_PATH", "aaa.md")
 # MARKDOWN_PATH = os.getenv("MARKDOWN_PATH")
@@ -211,6 +213,25 @@ def build_knowledge_graph_step1(kb_data: Dict[str, Any], config: RAGEngineConfig
 # WORKFLOW 2: UPDATE_KG - Independent KG rebuilding from Chroma
 # ============================================================================
 
+def rebuild_bm25_index_from_chroma() -> None:
+    """
+    独立构建 BM25 索引：
+    1. 从现有 Chroma 库读取所有 chunks
+    2. 使用 BM25 构建索引并保存到磁盘
+    """
+    print("\n" + "=" * 88)
+    print("[BUILD_BM25] 从 Chroma 构建 BM25 索引")
+    print("=" * 88)
+    
+    chroma_kb = ChromaKnowledgeBase(CHROMA_DIR)
+    try:
+        chroma_kb.build_bm25_index_from_chroma()
+        print(f"✓ BM25 索引已构建并保存到: {CHROMA_DIR / 'bm25_index.pkl'}")
+    except Exception as e:
+        print(f"❌ BM25 索引构建失败: {e}")
+        raise
+
+
 def rebuild_knowledge_graph_from_chroma() -> None:
     """
     步骤 2b (独立): 从 Chroma 查询所有数据，重建知识图谱
@@ -226,8 +247,6 @@ def rebuild_knowledge_graph_from_chroma() -> None:
     
     config = build_config()
     chroma_kb = ChromaKnowledgeBase(CHROMA_DIR)
-    
-    # Query all chunks from Chroma
     print("\n[Step 1] 从 Chroma 查询所有 chunks 并提取实体/关系...")
     try:
         all_data = chroma_kb.get_all()
@@ -424,6 +443,7 @@ def main() -> None:
     print("\n执行标志:")
     print(f"  UPDATE_KB (文档处理+知识库+知识图谱): {UPDATE_KB}")
     print(f"  UPDATE_KG (从 Chroma 重建知识图谱):   {UPDATE_KG}")
+    print(f"  BUILD_BM25 (从 Chroma 构建 BM25 索引): {BUILD_BM25}")
     print(f"  EXECUTE_QUERY (执行查询):           {EXECUTE_QUERY}")
     
     # Check existing data
@@ -441,10 +461,15 @@ def main() -> None:
     if UPDATE_KB:
         kb_data = build_knowledge_base_step1(pdf_path, config)
         build_knowledge_graph_step1(kb_data, config)
-    elif UPDATE_KG or EXECUTE_QUERY:
+    elif UPDATE_KG or EXECUTE_QUERY or BUILD_BM25:
         if not chroma_exists:
             print("\n⚠️  Chroma DB 不存在，无法继续")
             print("   请先执行 UPDATE_KB=true")
+            return
+
+    if BUILD_BM25:
+        rebuild_bm25_index_from_chroma()
+        if not (UPDATE_KB or UPDATE_KG or EXECUTE_QUERY):
             return
     
     # WORKFLOW 2: UPDATE_KG (independent)
