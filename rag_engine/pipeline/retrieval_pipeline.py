@@ -122,26 +122,44 @@ class LocalAnswerGenerator:
         api_key: str,
         model: str,
         temperature: float = 0.2,
-        max_tokens: int = 900,
+        max_tokens: int = 4000,
+        use_azure: bool = False,
+        azure_endpoint: Optional[str] = None,
+        azure_api_version: Optional[str] = None,
+        azure_deployment: Optional[str] = None,
     ):
         """
         Initialize answer generator.
 
         Args:
-            base_url: LLM API base URL
+            base_url: LLM API base URL (ignored when use_azure=True)
             api_key: API key
-            model: Model name
+            model: Model name (used as Azure deployment name when azure_deployment is None)
             temperature: Sampling temperature
             max_tokens: Maximum tokens for generation
+            use_azure: When True, use Azure OpenAI client
+            azure_endpoint: Azure resource endpoint (e.g. https://my-res.openai.azure.com)
+            azure_api_version: Azure OpenAI API version
+            azure_deployment: Azure OpenAI deployment name (defaults to ``model``)
         """
         try:
-            from openai import OpenAI
+            if use_azure:
+                from openai import AzureOpenAI
 
-            self.client = OpenAI(api_key=api_key, base_url=base_url)
+                self.client = AzureOpenAI(
+                    api_key=api_key,
+                    azure_endpoint=azure_endpoint,
+                    api_version=azure_api_version,
+                )
+            else:
+                from openai import OpenAI
+
+                self.client = OpenAI(api_key=api_key, base_url=base_url)
         except ImportError:
             logger.error("openai library not installed")
             raise
-        self.model = model
+        # On Azure, the chat completions API expects the deployment name in the `model` field.
+        self.model = (azure_deployment or model) if use_azure else model
         self.temperature = temperature
         self.max_tokens = max_tokens
 
@@ -162,8 +180,8 @@ class LocalAnswerGenerator:
         if not vector_result and not graph_result:
             return "No relevant information found in the knowledge base."
 
-        # Separate text chunks from relationship data
-        text_chunks = [doc for doc in vector_result if doc.content_type == ContentType.TEXT]
+        # All retrieved chunks (text/image/table) are already textualized by the parser/vision step
+        text_chunks = list(vector_result)
         relationships = [doc for doc in graph_result if "relationship" in doc.metadata.get("retrieval_channel", "") or "graph" in doc.metadata.get("retrieval_channel", "")]
         entity_chunks = [doc for doc in graph_result if "entity" in doc.metadata.get("retrieval_channel", "")]
 
@@ -171,7 +189,7 @@ class LocalAnswerGenerator:
         text_parts = []
         for idx, doc in enumerate(text_chunks, 1):
             channel = doc.metadata.get("retrieval_channel", "vector")
-            preview = doc.content[:1000].replace("\n", " ")
+            preview = doc.content[:4000]
             text_parts.append(
                 f"[Text-{idx}] (score={doc.score:.4f}, source={channel})\n{preview}"
             )
@@ -217,10 +235,11 @@ class LocalAnswerGenerator:
         prompt = f"""You are an enterprise RAG assistant. Answer the question based ONLY on the provided context.
 
 Instructions:
-- Use only information from the context below
-- If the context doesn't contain enough information, state "The provided documents do not contain sufficient information to answer this question."
-- Cite sources using the reference tags (e.g., Text-1, Entity-2, Rel-3)
-- Be concise but comprehensive
+- Use only information from the context below; do not invent values.
+- Preserve markdown table structure verbatim from the context — do NOT reformat, merge, or rename columns unless the question asks for it.
+- If the question asks to extract / list / output ALL items (parameters, dimensions, rows, etc.), enumerate them EXHAUSTIVELY. Do not summarize, do not collapse rows, do not write "etc." or "...". Every row in the source tables MUST appear in the answer.
+- If the context truly does not contain the answer, state: "The provided documents do not contain sufficient information to answer this question."
+- Cite sources using reference tags (e.g., Text-1, Entity-2, Rel-3) at the end of each table or section.
 
 Question: {query}
 
@@ -282,6 +301,10 @@ class RetrievalPipeline:
             api_key=self.config.embedding.api_key,
             model=self.config.embedding.model,
             base_url=self.config.embedding.base_url,
+            use_azure=self.config.embedding.use_azure,
+            azure_endpoint=self.config.embedding.azure_endpoint,
+            azure_api_version=self.config.embedding.azure_api_version,
+            azure_deployment=self.config.embedding.azure_deployment,
         )
 
     async def retrieve_hybrid(
@@ -549,7 +572,7 @@ class RetrievalPipeline:
             reranker.rerank(query, vector_result, top_k) if reranker else vector_result[:top_k]
         )
 
-        answer = generator.generate(query, vector_result, graph_result)
+        answer = generator.generate(query, reranked, graph_result)
 
         return {
             "query": query,

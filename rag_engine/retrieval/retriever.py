@@ -38,44 +38,75 @@ class EmbeddingProvider(ABC):
 
 
 class OpenAIEmbedding(EmbeddingProvider):
-    """OpenAI embedding provider"""
-    
-    def __init__(self, api_key: str, model: str = "text-embedding-3-large", base_url: Optional[str] = None):
-        """Initialize OpenAI embedding provider"""
+    """OpenAI / Azure OpenAI embedding provider"""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "text-embedding-3-large",
+        base_url: Optional[str] = None,
+        use_azure: bool = False,
+        azure_endpoint: Optional[str] = None,
+        azure_api_version: Optional[str] = None,
+        azure_deployment: Optional[str] = None,
+    ):
+        """Initialize embedding provider (supports OpenAI and Azure OpenAI)."""
         self.api_key = api_key
         self.model = model
         self.base_url = base_url or "https://api.openai.com/v1"
-    
-    async def embed_text(self, texts: List[str]) -> np.ndarray:
-        """Embed texts using OpenAI API"""
-        try:
-            from openai import AsyncOpenAI
-            
-            client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
-            
-            response = await client.embeddings.create(
-                model=self.model,
-                input=texts
+        self.use_azure = use_azure
+        self.azure_endpoint = azure_endpoint
+        self.azure_api_version = azure_api_version
+        # On Azure, the "model" parameter must be the deployment name.
+        self.azure_deployment = azure_deployment or model
+
+    def _build_async_client(self):
+        if self.use_azure:
+            from openai import AsyncAzureOpenAI
+            return AsyncAzureOpenAI(
+                api_key=self.api_key,
+                azure_endpoint=self.azure_endpoint,
+                api_version=self.azure_api_version,
             )
-            
+        from openai import AsyncOpenAI
+        return AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    def _build_sync_client(self):
+        if self.use_azure:
+            from openai import AzureOpenAI
+            return AzureOpenAI(
+                api_key=self.api_key,
+                azure_endpoint=self.azure_endpoint,
+                api_version=self.azure_api_version,
+            )
+        from openai import OpenAI
+        return OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    def _model_name(self) -> str:
+        return self.azure_deployment if self.use_azure else self.model
+
+    async def embed_text(self, texts: List[str]) -> np.ndarray:
+        """Embed texts using OpenAI / Azure OpenAI API"""
+        try:
+            client = self._build_async_client()
+            response = await client.embeddings.create(
+                model=self._model_name(),
+                input=texts,
+            )
             embeddings = [item.embedding for item in response.data]
             return np.array(embeddings)
         except ImportError:
             logger.error("openai library not installed. Install with: pip install openai")
             raise
-    
+
     def embed_text_sync(self, texts: List[str]) -> np.ndarray:
-        """Synchronous embedding using OpenAI API"""
+        """Synchronous embedding using OpenAI / Azure OpenAI API"""
         try:
-            from openai import OpenAI
-            
-            client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-            
+            client = self._build_sync_client()
             response = client.embeddings.create(
-                model=self.model,
-                input=texts
+                model=self._model_name(),
+                input=texts,
             )
-            
             embeddings = [item.embedding for item in response.data]
             return np.array(embeddings)
         except ImportError:

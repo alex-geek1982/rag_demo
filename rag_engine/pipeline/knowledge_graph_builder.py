@@ -85,6 +85,10 @@ class KnowledgeGraphBuilder:
             api_key=self.config.embedding.api_key,
             model=self.config.embedding.model,
             base_url=self.config.embedding.base_url,
+            use_azure=self.config.embedding.use_azure,
+            azure_endpoint=self.config.embedding.azure_endpoint,
+            azure_api_version=self.config.embedding.azure_api_version,
+            azure_deployment=self.config.embedding.azure_deployment,
         )
 
     def _count_tokens(self, text: str) -> int:

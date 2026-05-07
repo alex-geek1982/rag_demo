@@ -131,7 +131,11 @@ class ChromaKnowledgeBase:
         """
         try:
             # Delete existing collection
-            self.client.delete_collection(COLLECTION_NAME)
+            try:
+                self.client.delete_collection(COLLECTION_NAME)
+            except:
+                logger.info(f"Collection '{COLLECTION_NAME}' not found for deletion, skipping")
+                pass  # Collection might not exist  
 
             # Create new collection
             self.collection = self.client.get_or_create_collection(
@@ -280,7 +284,8 @@ class ChromaKnowledgeBase:
                 })
 
             if not ids:
-                raise RuntimeError("No entities to index into Chroma")
+                logger.info("No entities to index into Chroma")
+                return
 
             self.entities_collection.add(
                 ids=ids,

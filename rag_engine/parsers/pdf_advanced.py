@@ -87,6 +87,9 @@ class AdvancedPDFProcessor:
         vision_base_url: Optional[str] = None,
         vision_model: Optional[str] = None,
         vision_provider: str = "openai",
+        vision_azure_endpoint: Optional[str] = None,
+        vision_azure_api_version: Optional[str] = None,
+        vision_azure_deployment: Optional[str] = None,
         context_window_pixels: int = 200,
         min_image_area: int = 1000,
         max_surrounding_text_chars: int = 2000,
@@ -130,8 +133,11 @@ class AdvancedPDFProcessor:
         self.vision_base_url = vision_base_url
         self.vision_model = vision_model or "gpt-4.1-mini"
         self.vision_provider = vision_provider.lower()
+        self.vision_azure_endpoint = vision_azure_endpoint
+        self.vision_azure_api_version = vision_azure_api_version
+        self.vision_azure_deployment = vision_azure_deployment
         self.vision_client = None
-        
+
         if use_vision_api:
             self._init_vision_api(vision_api_key)
     
@@ -178,6 +184,43 @@ class AdvancedPDFProcessor:
                 except ImportError:
                     logger.error("google-generativeai package not installed. Install with: pip install google-generativeai")
                     self.vision_client = None
+            elif self.vision_provider == "azure":
+                # Initialize Azure OpenAI client for Vision
+                from openai import AzureOpenAI
+
+                azure_endpoint = (
+                    self.vision_azure_endpoint
+                    or os.getenv("AZURE_OPENAI_ENDPOINT")
+                )
+                api_version = (
+                    self.vision_azure_api_version
+                    or os.getenv("AZURE_OPENAI_API_VERSION")
+                    or "2024-08-01-preview"
+                )
+                if not azure_endpoint:
+                    logger.warning(
+                        "Azure Vision API disabled: AZURE_OPENAI_ENDPOINT not configured."
+                    )
+                    self.vision_client = None
+                    return
+
+                self.vision_client = AzureOpenAI(
+                    api_key=key,
+                    azure_endpoint=azure_endpoint,
+                    api_version=api_version,
+                )
+                # On Azure, the chat-completions API expects the deployment name in the
+                # `model` field, so resolve it once here.
+                self.vision_model = (
+                    self.vision_azure_deployment
+                    or os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT")
+                    or self.vision_model
+                    or os.getenv("VISION_MODEL")
+                    or "gpt-4o"
+                )
+                logger.info(
+                    f"Azure OpenAI Vision API initialized using deployment {self.vision_model}"
+                )
             else:
                 # Initialize OpenAI-compatible client
                 from openai import OpenAI
@@ -251,11 +294,34 @@ class AdvancedPDFProcessor:
                 table_blocks: List[TextBlock] = []
                 for page_num, page in enumerate(pdf.pages):
                     page_heights[page_num] = float(getattr(page, "height", 0.0))
+
+                    # Pages dominated by CAD/engineering drawings should be treated
+                    # as a single image — their "text" is just scattered dimension
+                    # labels and tolerance notes that are meaningless without the drawing.
+                    # Embedded raster images on these pages (title-block logos, etc.)
+                    # are already captured by the full-page render, so we skip
+                    # per-image extraction to avoid duplicate/orphaned content.
+                    if self.extract_images and self._is_drawing_page(page):
+                        page_image = self._render_page_as_image(
+                            page, page_num, file_path, doc_id
+                        )
+                        if page_image is not None:
+                            logger.info(
+                                f"Page {page_num} detected as drawing — treating entire page as image"
+                            )
+                            all_images.append(page_image)
+                        else:
+                            logger.warning(
+                                f"Page {page_num} detected as drawing but render failed — "
+                                f"skipping page to avoid emitting orphaned embedded images"
+                            )
+                        continue
+
                     # Extract page-level text blocks first
                     page_text_blocks: List[TextBlock] = []
                     if self.extract_text:
                         page_text_blocks = self._extract_text_blocks(page, page_num)
-                    
+
                     # Extract images with positions
                     if self.extract_images:
                         images = self._extract_images_from_page(
@@ -1344,6 +1410,71 @@ class AdvancedPDFProcessor:
         )
         return any(re.fullmatch(pattern, compact) for pattern in page_patterns)
     
+    def _is_drawing_page(self, page: Any) -> bool:
+        """Detect pages that are primarily CAD/engineering drawings.
+
+        Such pages encode the drawing as vector graphics (lines + curves) rather
+        than a raster image, so pdfplumber happily extracts the dimension labels
+        and tolerance notes as text — but those fragments are meaningless without
+        the drawing itself. We render the whole page as one image instead.
+        """
+        line_count = len(getattr(page, "lines", []) or [])
+        curve_count = len(getattr(page, "curves", []) or [])
+        vector_count = line_count + curve_count
+
+        # Ordinary text pages have very few vector strokes; even pages with
+        # decorative rules or simple charts stay well under this floor.
+        if vector_count < 300:
+            return False
+
+        width = float(getattr(page, "width", 0.0) or 0.0)
+        height = float(getattr(page, "height", 0.0) or 0.0)
+        if width <= 0 or height <= 0:
+            return False
+
+        density = vector_count * 1000.0 / (width * height)
+        is_landscape = (width / height) > 1.3
+
+        # Either dense vector content per unit area, or a landscape engineering
+        # paper size (A3/A2 etc.) carrying a substantial vector payload.
+        return density > 1.0 or (is_landscape and vector_count > 500)
+
+    def _render_page_as_image(
+        self,
+        page: Any,
+        page_num: int,
+        pdf_path: str,
+        doc_id: str,
+    ) -> Optional[ImageLocation]:
+        """Render the full PDF page as a single PNG and return its ImageLocation."""
+        try:
+            pdf_path_obj = Path(pdf_path)
+            images_dir = pdf_path_obj.parent / f"{doc_id}_images"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            image_path = images_dir / f"page{page_num}_full.png"
+
+            rendered = page.to_image(resolution=200)
+            if hasattr(rendered, "original") and hasattr(rendered.original, "save"):
+                rendered.original.save(image_path, "PNG")
+            else:
+                rendered.save(str(image_path))
+
+            width = float(getattr(page, "width", 0.0) or 0.0)
+            height = float(getattr(page, "height", 0.0) or 0.0)
+            return ImageLocation(
+                image_path=str(image_path),
+                page_num=page_num,
+                x0=0.0,
+                y0=0.0,
+                x1=width,
+                y1=height,
+                width=width,
+                height=height,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to render page {page_num} as image: {e}")
+            return None
+
     def _extract_images_from_page(
         self,
         page: Any,
@@ -1682,7 +1813,7 @@ class AdvancedPDFProcessor:
     
     def _get_vision_prompt(self, context_above: str, context_below: str) -> str:
         """
-        Generate RAGFlow-style prompt for image analysis with context.
+        Generate prompt for image analysis with context.
         Supports both structured data (tables/charts) and general figures.
         """
         prompt = """## ROLE
@@ -1702,63 +1833,229 @@ Surrounding context may be used only for minimal clarification or disambiguation
         prompt += """
 ## DECISION RULE (CRITICAL)
 
-First, determine whether the image contains an explicit visual data representation with enumerable data units forming a coherent dataset.
+Classify the image into exactly one of four modes:
 
-Enumerable data units are clearly separable, repeatable elements intended for comparison, measurement, or aggregation, such as:
-- Rows or columns in a table
-- Individual bars in a bar chart
-- Identifiable data points or series in a line graph
-- Labeled segments in a pie chart
-- UI table rows with repeated structure
+watermarks, blank or near-blank images, page borders, social-media badges, and similar purely-decorative or branding elements. The image conveys no data, no instructions, no diagram, and no descriptive scene relevant to the surrounding text.
+- MODE 1 (STRUCTURED DATA): contains enumerable data units forming a coherent dataset (table rows/columns, bars, line-graph points/series, pie segments). Numbers or labels alone do NOT qualify.
+- MODE 2 (GENERAL FIGURE): everything else (photographs, illustrations, screenshots, conceptual diagrams, flowcharts, maps, etc.) that carries informational content but does not fit other modes.
+- MODE 3 ELEVATOR DESIGN DRAWING: a technical drawing for an elevator schematic. Extract all parameters including dimensions, labels, notes, title block info, and technical specifications. The drawing may be complex and contain many annotations; extract every visible detail without omission. This is a special case of MODE 2 with exhaustive parameter extraction for engineering use.
+- MODE 4 (LOW-INFORMATION / DECORATIVE): the image carries no meaningful informational content for a document reader. This includes: emojis, emoticons, single icons, brand logos / wordmarks, decorative dividers, ornamental flourishes, bullet markers, stock background patterns, 
 
-The mere presence of numbers, icons, UI elements, or labels does NOT qualify unless they together form such a dataset.
+Prefer MODE 4 whenever the image is plausibly decorative or branding. If unsure between MODE 4 and MODE 2, choose MODE 4 for tiny / iconic / single-symbol images and MODE 2 only when there is a real scene, multiple labeled elements, or content a reader would lose by skipping.
 
-## TASKS
+## RULES
 
-1. Inspect the image and determine which output mode applies based on the decision rule.
-2. Use surrounding context only to disambiguate terms that appear in the image.
-3. Follow the output rules strictly.
-4. Include only content that is explicitly visible in the image.
-5. Do not infer intent, functionality, process logic, or meaning beyond what is visually or textually shown.
-
-## OUTPUT RULES (STRICT)
-
-- Produce output in exactly one of the two modes defined below.
-- Do NOT mention, label, or reference the modes in the output.
-- Do NOT combine content from both modes.
-- Do NOT explain or justify the choice of mode.
-- Do NOT add any headings, titles, or commentary beyond what the mode requires.
+- Use surrounding context only to disambiguate terms visible in the image.
+- Include only what is visibly present. Do not infer intent or behavior.
+- Output exactly one mode. Do NOT label, mix, or justify the mode choice.
+- Do NOT add headings/prefixes beyond what the mode specifies.
+- Transcribe all visible text, numbers, units, and symbols verbatim (preserve units, e.g., mm, kg, V, °, Ø, ±).
 
 ---
 
-## MODE 1: STRUCTURED VISUAL DATA OUTPUT
+## MODE 1: STRUCTURED VISUAL DATA
 
-(Use only if the image contains enumerable data units forming a coherent dataset.)
-
-Output only the following fields:
-- Visual Type: (e.g., table, bar chart, line chart, pie chart, etc.)
+- Visual Type:
 - Title: (if visible)
-- Axes / Legends / Labels: (list key labels and their meanings)
-- Data Points: (concise list of key data rows or values)
-- Captions / Annotations: (any visible annotations or notes)
+- Axes / Legends / Labels:
+- Data Points: (concise list of rows/values)
+- Captions / Annotations:
 
 ---
 
-## MODE 2: GENERAL FIGURE CONTENT
+## MODE 2: GENERAL FIGURE
 
-(Use only if the image does NOT contain enumerable data units.)
+Write directly, no prefix. Describe regions top-to-bottom, left-to-right. Name elements exactly as labeled, transcribe text verbatim, describe spatial grouping. No interpretation. Concise, information-dense sentences.
 
-Write the content directly, starting from the first sentence. Do NOT add any introductory labels, titles, headings, or prefixes.
+---
 
-Requirements:
-- Describe visible regions and components in a stable order (e.g., top-to-bottom, left-to-right).
-- Explicitly name interface elements or visual objects exactly as they appear (e.g., tabs, panels, buttons, icons, input fields).
-- Transcribe all visible text verbatim; do not paraphrase, summarize, or reinterpret labels.
-- Describe spatial grouping, containment, and alignment of elements.
-- Do NOT interpret intent, behavior, workflows, or processes.
-- Avoid narrative or stylistic language unless it is a dominant and functional visual element.
+## MODE 3: ELEVATOR DESIGN DRAWING (EXHAUSTIVE PARAMETER EXTRACTION)
 
-Use concise, information-dense sentences.
+Extract every visible parameter, dimension, label, note, and title-block entry from the elevator design drawing. Do NOT summarize, paraphrase, or omit. Transcribe text, numbers, units, and symbols verbatim (preserve mm, kg, V, °, Ø, ±, MPa, etc.). Preserve formulas exactly as written (e.g., `CARWID - 2TH - 1`, `CARWID × 0.0029 + 0.04`).
+
+Organize the extraction into Markdown tables grouped by topic. Use these section headings when the corresponding content is present (omit a section only if no such content appears in the drawing):
+
+Each table MUST have exactly two columns: the leftmost column is the parameter / dimension / item name; the right column is its formula, range, or value (with units). Use one row per parameter. Do NOT merge cells. Do NOT add a third column for comments — fold any qualifier into the value cell (e.g., `As per Std.`, `Acc. to drawing 8000710228 group A2`).
+
+Bracket notation conventions to preserve verbatim:
+- `[ ]` — free / unconstrained variable
+- `[a - b]` — value range from `a` to `b`
+- `[expression]` — derived formula (e.g., `[CARWID - 2TH - 1]`)
+- `(0 / -0.50)` — bilateral or one-sided tolerance
+- `Ø`, `±`, `×` — keep symbol as-is
+
+Output Example (format your response exactly like this when the drawing matches, fields and values will differ based on the actual drawing content):
+
+Elevator design drawing with detailed parameter extraction:
+
+### Drawing Information
+
+| Field | Value |
+| --- | --- |
+| Drawing No. | 8000702043 |
+| Title | CROSSBEAM PLATFORM 425/630KG |
+| Revision | D |
+| Scale | 1:5 |
+| Region Code | 00 |
+| Projection | First Angle |
+
+### Variable Options Table
+
+| Parameter | Formula / Range |
+| --- | --- |
+| CARWID | [ ] |
+| TH | [ ] |
+| AA | [CARWID - 2TH - 1] |
+| BB | [129 - 2TH] |
+| CC | [CARWID - 60] |
+| DD | [20 - TH] |
+| EE | [63.5 - TH] |
+| FF | [38 - TH] |
+
+### Material & Weight
+
+| Parameter | Value |
+| --- | --- |
+| Material (A2) | Acc. to drawing 8000710228 group A2 |
+| Material (A3) | Acc. to drawing 8000710228 group A3 |
+| Re min. (A2) | 235 MPa |
+| Re min. (A3) | As per Std. |
+| Weight formula (TH = 1.5 mm) | CARWID × 0.0029 + 0.04 |
+
+### Thickness Table (TH)
+
+| Variant | Thickness (mm) |
+| --- | --- |
+| EA | 1.5 |
+| LA | 1.55 |
+
+### Main Dimensions (Top View)
+
+| Dimension | Value (mm) |
+| --- | --- |
+| Overall length | AA (0 / -0.50) |
+| End to first feature group | 300 |
+| Sub-dimension | 230 |
+| Edge offset | 3 |
+| Position | 16 |
+| Position | 40 |
+| Hole pattern reference | 35 |
+| Reference | 20 |
+| Reference | 70 |
+| Spacing | 140 |
+| Spacing | 36 |
+| Spacing | 80 |
+| Symmetric span | 270 |
+| End offset | 75 |
+| End offset | 30 |
+| End offset | 30 |
+| Hole pattern (top) | 22 × Ø9 |
+| Large holes | 2 × Ø38 |
+
+### Profile Section B-B (1:2)
+
+| Dimension | Value |
+| --- | --- |
+| Flange width (top) | 37 |
+| Flange height | 25 |
+| Web height | BB ±0.50 |
+| Overall width | 70 |
+| Inside radius | R1.5 typ. |
+| Material thickness | 1.5 (TH) |
+| Top inside angle | 90° |
+| Middle angle | 90° (0° / -0.50°) |
+| Bottom angle | 90° (+0.50° / 0°) |
+
+### Detail View (Left – Bracket End)
+
+| Dimension | Value (mm) |
+| --- | --- |
+| Edge distance | 20 |
+| Edge distance | 5 |
+| Top offset | 3 |
+| Hole pattern | 6 × Ø9 |
+| Spacing | 45 |
+| Total | 90 |
+| Spacing | 25 |
+| Bottom offset | 3 |
+| Reference | DD |
+| Width | 17.5 |
+| Width | 35 |
+| Slots | 2 × Slots 9 × 14 |
+
+### Side / Front View Dimensions
+
+| Dimension | Value (mm) |
+| --- | --- |
+| Chamfer | 30 × 45° |
+| Hole pattern (front) | 10 × Ø9 |
+| Edge to first hole | 90 |
+| Spacing | 190 |
+| Spacing | 45 |
+| Spacing | 75 |
+| Symmetric span | 190 |
+| Top edge | 20 |
+| Position | CC ±0.2 |
+
+### Bottom View Dimensions
+
+| Dimension | Value (mm) |
+| --- | --- |
+| Edge | 13 |
+| Hole position | 59.5 |
+| Holes | 2 × Ø9 |
+| Slots | 4 × 8.25 |
+
+### General Tolerances
+
+| Range | Tolerance |
+| --- | --- |
+| Angular 0–10 (UNE-EN 22768-1, Coarse) | ±1°30' |
+| Angular 10–50 (UNE-EN 22768-1, Coarse) | ±1° |
+| Angular 50–120 (UNE-EN 22768-1, Coarse) | ±0°30' |
+| Angular 120–400 (UNE-EN 22768-1, Coarse) | ±0°15' |
+| Length 0.49–3 mm (UNE-EN 22768-1, Mean) | ±0.1 mm |
+| Length 3–6 mm (UNE-EN 22768-1, Mean) | ±0.1 mm |
+| Length 6–30 mm (UNE-EN 22768-1, Mean) | ±0.2 mm |
+| Length 30–120 mm (UNE-EN 22768-1, Mean) | ±0.3 mm |
+| Length 120–400 mm (UNE-EN 22768-1, Mean) | ±0.5 mm |
+| Length 400–1000 mm (UNE-EN 22768-1, Mean) | ±0.8 mm |
+| Length 1000–2000 mm (UNE-EN 22768-1, Mean) | ±1.2 mm |
+| Length 2000–4000 mm (UNE-EN 22768-1, Mean) | ±2 mm |
+
+### Symbols / Callouts
+
+| Symbol | Meaning (Quantity) |
+| --- | --- |
+| ▽ (5) | Critical to Safety (1) |
+| ▽ (Q) | Critical to Quality (1) |
+
+### Reference Markers
+
+| Marker | Location |
+| --- | --- |
+| Reference markers present on drawing | A1, A2, A3, B1, B2, B3, B4, D1, D2, D3, D4, D5, D6, D7, EE, FF |
+
+Rules specific to MODE 3:
+- No prose introduction, no closing summary — output only the section headings and tables.
+- If a parameter appears multiple times in the drawing with the same value, list it once.
+- If a parameter appears with conflicting values in different views, list each occurrence with the view in parentheses in the parameter cell (e.g., `Overall length (top view)`).
+- If units are shown once for a whole table (e.g., "Value (mm)"), keep them in the column header and omit them from each row.
+- Empty / blank cells in the source remain `[ ]`, not "N/A" or "-".
+
+---
+
+## MODE 4: LOW-INFORMATION / DECORATIVE
+
+Output a single short sentence (≤ 15 words) naming what the image is. No headings, no prefix, no list, no transcription beyond a brand/logo name if clearly visible.
+
+Examples of acceptable outputs:
+- "Decorative checkmark emoji."
+- "Company logo: ACME."
+- "Ornamental horizontal divider."
+- "Blank placeholder image."
+
+Do NOT describe colors, composition, style, or surrounding context. Do NOT speculate about meaning. If the image is truly empty or unreadable, output: "Blank or non-informative image."
 """
         
         return prompt
@@ -1770,11 +2067,11 @@ Use concise, information-dense sentences.
     ) -> str:
         """Use Vision API to describe image with advanced RAGFlow-style prompting"""
         try:
-            # Determine client type based on provider
+            # Determine client type based on provider.
+            # Azure uses the same chat.completions surface as OpenAI, so it shares the openai path.
             if self.vision_provider == "gemini":
                 return self._describe_image_with_gemini(image_path, context_info)
             else:
-                # Default to OpenAI-compatible client
                 return self._describe_image_with_openai(image_path, context_info)
         except Exception as e:
             logger.warning(f"Vision API description failed: {e}")

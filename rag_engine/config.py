@@ -20,6 +20,11 @@ class EmbeddingConfig:
     batch_num: int = int(os.getenv("EMBEDDING_BATCH_NUM", "32"))  # Batch size for embedding
     max_async: int = int(os.getenv("EMBEDDING_MAX_ASYNC", "10"))  # Concurrent embedding requests
     cache_config: Optional[Dict[str, Any]] = None  # Cache configuration
+    # Azure OpenAI support
+    use_azure: bool = os.getenv("EMBEDDING_USE_AZURE", "false").lower() == "true"
+    azure_endpoint: Optional[str] = os.getenv("AZURE_OPENAI_ENDPOINT")
+    azure_api_version: Optional[str] = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+    azure_deployment: Optional[str] = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
 
 
 @dataclass
@@ -34,6 +39,11 @@ class LLMConfig:
     model_max_async: int = int(os.getenv("LLM_MODEL_MAX_ASYNC", "10"))
     model_kwargs: Dict[str, Any] = field(default_factory=dict)  # Additional model parameters
     enable_cache: bool = os.getenv("LLM_ENABLE_CACHE", "true").lower() == "true"  # Enable LLM response caching
+    # Azure OpenAI support
+    use_azure: bool = os.getenv("LLM_USE_AZURE", "false").lower() == "true"
+    azure_endpoint: Optional[str] = os.getenv("AZURE_OPENAI_ENDPOINT")
+    azure_api_version: Optional[str] = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+    azure_deployment: Optional[str] = os.getenv("AZURE_OPENAI_LLM_DEPLOYMENT")
 
 
 @dataclass
@@ -44,7 +54,11 @@ class VisionConfig:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     enabled: bool = True
-    provider: str = os.getenv("VISION_PROVIDER", "openai")  # "openai" or "gemini"
+    provider: str = os.getenv("VISION_PROVIDER", "openai")  # "openai", "azure", or "gemini"
+    # Azure OpenAI support
+    azure_endpoint: Optional[str] = os.getenv("AZURE_OPENAI_ENDPOINT")
+    azure_api_version: Optional[str] = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+    azure_deployment: Optional[str] = os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT")
 
 
 @dataclass
@@ -66,7 +80,11 @@ class PDFProcessingConfig:
     vision_api_key: Optional[str] = os.getenv("PDF_VISION_API_KEY")  # Defaults to OPENAI_API_KEY if not set
     vision_base_url: Optional[str] = os.getenv("PDF_VISION_BASE_URL")  # Vision API endpoint
     vision_model: Optional[str] = os.getenv("PDF_VISION_MODEL")  # Vision model name
-    vision_provider: str = os.getenv("PDF_VISION_PROVIDER", "openai")  # "openai" or "gemini"
+    vision_provider: str = os.getenv("PDF_VISION_PROVIDER", "openai")  # "openai", "azure", or "gemini"
+    # Azure OpenAI fields for vision (used when vision_provider == "azure")
+    vision_azure_endpoint: Optional[str] = os.getenv("AZURE_OPENAI_ENDPOINT")
+    vision_azure_api_version: Optional[str] = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+    vision_azure_deployment: Optional[str] = os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT")
     context_window_pixels: int = int(os.getenv("PDF_CONTEXT_WINDOW_PIXELS", "200"))
     min_image_area: int = int(os.getenv("PDF_MIN_IMAGE_AREA", "1000"))
     max_surrounding_text_chars: int = int(os.getenv("PDF_MAX_SURROUNDING_TEXT_CHARS", "2000"))
@@ -84,6 +102,9 @@ class PDFProcessingConfig:
             "vision_base_url": vision_config.base_url,
             "vision_model": vision_config.model,
             "vision_provider": vision_config.provider,
+            "vision_azure_endpoint": vision_config.azure_endpoint,
+            "vision_azure_api_version": vision_config.azure_api_version,
+            "vision_azure_deployment": vision_config.azure_deployment,
         }
         params.update(overrides)
         return cls(**params)

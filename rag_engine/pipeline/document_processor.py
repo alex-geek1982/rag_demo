@@ -106,7 +106,7 @@ class DocumentProcessor:
                 vision_config=self.config.vision,
             )
             
-            if markdown_path is None:
+            if markdown_path is None or not Path(markdown_path).exists():
                 document = parser.parse(str(path))
                 content_blocks_from_parser = document.get_content_blocks()
                 if content_blocks_from_parser:
@@ -124,6 +124,12 @@ class DocumentProcessor:
                         page_num=None,
                         language=language,
                     )]
+
+                if markdown_path:
+                    md_path = Path(markdown_path)
+                    md_path.parent.mkdir(parents=True, exist_ok=True)
+                    md_path.write_text(self._convert_to_markdown(document), encoding='utf-8')
+                    logger.info(f"Markdown saved to: {markdown_path}")
             else:
                 # Load from pre-processed markdown
                 document = Document(
@@ -214,6 +220,70 @@ class DocumentProcessor:
                 continue
 
         return results
+
+    def _count_tokens(self, text: str) -> int:
+        """Estimate token count (~4 chars per token, matching chunker heuristic)."""
+        if not text:
+            return 0
+        return max(1, len(text) // 4)
+
+    def _chunk_token_count(self, chunk: Chunk) -> int:
+        """Return cached token_count from metadata if present, else estimate."""
+        if chunk.metadata:
+            cached = chunk.metadata.get('token_count')
+            if isinstance(cached, int) and cached > 0:
+                return cached
+        return self._count_tokens(chunk.text)
+
+    def _merge_chunks_by_token_size(
+        self,
+        chunks: List[Chunk],
+        max_tokens: int = 4096,
+    ) -> List[Chunk]:
+        """
+        Merge consecutive chunks whose combined token count stays within max_tokens.
+
+        Rules:
+        - Chunks already over max_tokens are kept as-is (never split).
+        - Only chunks of the same chunk_type are merged, so tables/images stay intact.
+        - source_block_ids are extended in-order without duplicates.
+        - The merged chunk inherits the first chunk's title/section context.
+        """
+        if not chunks:
+            return []
+
+        merged: List[Chunk] = []
+
+        for chunk in chunks:
+            chunk_tokens = self._chunk_token_count(chunk)
+
+            if not merged:
+                merged.append(chunk)
+                continue
+
+            prev = merged[-1]
+            if prev.chunk_type != chunk.chunk_type:
+                merged.append(chunk)
+                continue
+
+            prev_tokens = self._chunk_token_count(prev)
+            if prev_tokens + chunk_tokens > max_tokens:
+                merged.append(chunk)
+                continue
+
+            prev.text = prev.text + '\n' + chunk.text
+            seen = set(prev.source_block_ids)
+            for sid in chunk.source_block_ids:
+                if sid not in seen:
+                    prev.source_block_ids.append(sid)
+                    seen.add(sid)
+            prev.metadata['token_count'] = prev_tokens + chunk_tokens
+            prev.metadata['merged'] = True
+
+        logger.debug(
+            f"Merged {len(chunks)} chunks into {len(merged)} chunks (max {max_tokens} tokens)"
+        )
+        return merged
 
     def _process_content_blocks(self, document: Document) -> None:
         """Process content blocks with appropriate processors."""

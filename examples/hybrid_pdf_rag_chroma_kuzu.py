@@ -14,6 +14,15 @@
 运行方式（PowerShell）：
 $env:DEEPBRICKS_API_KEY = "<your-key>"
 d:/workspace/llamaindex_demo/.venv/Scripts/python.exe examples/hybrid_pdf_rag_chroma_kuzu.py
+
+Azure OpenAI 模式（任一组件可独立启用）：
+$env:USE_AZURE_OPENAI = "true"                 # 一键开关 LLM + Embedding + Vision
+$env:AZURE_OPENAI_API_KEY = "<your-azure-key>"
+$env:AZURE_OPENAI_ENDPOINT = "https://<resource>.openai.azure.com"
+$env:AZURE_OPENAI_API_VERSION = "2024-08-01-preview"
+$env:AZURE_OPENAI_LLM_DEPLOYMENT = "gpt-4o"
+$env:AZURE_OPENAI_EMBEDDING_DEPLOYMENT = "text-embedding-3-large"
+$env:AZURE_OPENAI_VISION_DEPLOYMENT = "gpt-4o"
 """
 
 import asyncio
@@ -49,7 +58,8 @@ from rag_engine.pipeline.retrieval_pipeline import (
     LocalAnswerGenerator,
 )
 
-DEFAULT_PDF_PATH = PROJECT_ROOT / "examples" / "京东订单多维度调度系统PRD1.0.pdf"
+# DEFAULT_PDF_PATH = PROJECT_ROOT / "examples" / "京东订单多维度调度系统PRD1.0.pdf"
+DEFAULT_PDF_PATH = PROJECT_ROOT / "examples" / "8000702043.PDF"
 OUTPUT_DIR = PROJECT_ROOT / "output" / "hybrid_pdf_rag_demo"
 CHROMA_DIR = OUTPUT_DIR / "chroma_db"
 KUZU_DIR = OUTPUT_DIR / "kuzu_db"
@@ -63,13 +73,28 @@ GEN_MODEL = os.getenv("GEN_MODEL", "gpt-4.1-mini")
 VISION_MODEL = os.getenv("VISION_MODEL", "GPT-4o")
 VISION_PROVIDER = os.getenv("VISION_PROVIDER", "openai")
 DEEPBRICKS_BASE_URL = os.getenv("DEEPBRICKS_BASE_URL", "https://api.deepbricks.ai/v1/")
-DEEPBRICKS_API_KEY = os.getenv("DEEPBRICKS_API_KEY", "sk-F4x4h7mc8GjjURTPcxGMXnuuo463D1p2clJ4Pp55ch00QH30") or os.getenv("OPENAI_API_KEY")
+DEEPBRICKS_API_KEY = os.getenv("DEEPBRICKS_API_KEY") or os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-UPDATE_KB = os.getenv("UPDATE_KB", "false").strip().lower() == "true"
-UPDATE_KG = os.getenv("UPDATE_KG", "false").strip().lower() == "true"
-BUILD_BM25 = os.getenv("BUILD_BM25", "false").strip().lower() == "true"
+
+# ---------- Azure OpenAI ----------
+# Master switch: when USE_AZURE_OPENAI=true, all three components (LLM / Embedding / Vision)
+# default to Azure. Each can still be independently overridden via the per-component flags.
+USE_AZURE_OPENAI = os.getenv("USE_AZURE_OPENAI", "false").strip().lower() == "true"
+LLM_USE_AZURE = os.getenv("LLM_USE_AZURE", str(USE_AZURE_OPENAI)).strip().lower() == "true"
+EMBEDDING_USE_AZURE = os.getenv("EMBEDDING_USE_AZURE", str(USE_AZURE_OPENAI)).strip().lower() == "true"
+VISION_USE_AZURE = os.getenv("VISION_USE_AZURE", str(USE_AZURE_OPENAI)).strip().lower() == "true"
+
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+AZURE_OPENAI_LLM_DEPLOYMENT = os.getenv("AZURE_OPENAI_LLM_DEPLOYMENT")
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
+AZURE_OPENAI_VISION_DEPLOYMENT = os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT")
+UPDATE_KB = os.getenv("UPDATE_KB", "true").strip().lower() == "true"
+UPDATE_KG = os.getenv("UPDATE_KG", "true").strip().lower() == "true"
+BUILD_BM25 = os.getenv("BUILD_BM25", "true").strip().lower() == "true"
 EXECUTE_QUERY = os.getenv("EXECUTE_QUERY", "true").strip().lower() == "true"
-MARKDOWN_PATH = os.getenv("MARKDOWN_PATH", "aaa.md")
+MARKDOWN_PATH = os.getenv("MARKDOWN_PATH", "bbb.md")
 # MARKDOWN_PATH = os.getenv("MARKDOWN_PATH")
 
 def configure_console() -> None:
@@ -81,35 +106,84 @@ def configure_console() -> None:
 
 def build_config() -> RAGEngineConfig:
     """Build RAG engine configuration."""
-    vision_config = VisionConfig(
-        model=VISION_MODEL,
-        api_key=DEEPBRICKS_API_KEY if DEEPBRICKS_BASE_URL else (GEMINI_API_KEY or DEEPBRICKS_API_KEY),
-        base_url=DEEPBRICKS_BASE_URL,
-        enabled=True,
-        provider=VISION_PROVIDER,
-    )
-    
-    return RAGEngineConfig(
-        working_dir=str(OUTPUT_DIR),
-        output_dir=str(OUTPUT_DIR),
-        embedding=EmbeddingConfig(
+    # ---------- Vision ----------
+    if VISION_USE_AZURE:
+        vision_config = VisionConfig(
+            model=AZURE_OPENAI_VISION_DEPLOYMENT or VISION_MODEL,
+            api_key=AZURE_OPENAI_API_KEY,
+            base_url=None,
+            enabled=True,
+            provider="azure",
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            azure_api_version=AZURE_OPENAI_API_VERSION,
+            azure_deployment=AZURE_OPENAI_VISION_DEPLOYMENT or VISION_MODEL,
+        )
+    else:
+        vision_config = VisionConfig(
+            model=VISION_MODEL,
+            api_key=DEEPBRICKS_API_KEY if DEEPBRICKS_BASE_URL else (GEMINI_API_KEY or DEEPBRICKS_API_KEY),
+            base_url=DEEPBRICKS_BASE_URL,
+            enabled=True,
+            provider=VISION_PROVIDER,
+        )
+
+    # ---------- Embedding ----------
+    if EMBEDDING_USE_AZURE:
+        embedding_config = EmbeddingConfig(
+            model=AZURE_OPENAI_EMBEDDING_DEPLOYMENT or EMBED_MODEL,
+            dimension=int(os.getenv("EMBEDDING_DIM", "3072")),
+            api_key=AZURE_OPENAI_API_KEY,
+            base_url=None,
+            batch_num=32,
+            max_async=10,
+            use_azure=True,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            azure_api_version=AZURE_OPENAI_API_VERSION,
+            azure_deployment=AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+        )
+    else:
+        embedding_config = EmbeddingConfig(
             model=EMBED_MODEL,
             dimension=1024,
             api_key="ollama",
             base_url=OLLAMA_OPENAI_BASE_URL,
             batch_num=32,
             max_async=10,
-        ),
-        llm=LLMConfig(
+        )
+
+    # ---------- LLM ----------
+    if LLM_USE_AZURE:
+        llm_config = LLMConfig(
+            model=AZURE_OPENAI_LLM_DEPLOYMENT or GEN_MODEL,
+            api_key=AZURE_OPENAI_API_KEY,
+            base_url=None,
+            temperature=0.2,
+            max_tokens=4000,
+            model_max_token_size=8192,
+            model_max_async=10,
+            enable_cache=True,
+            use_azure=True,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            azure_api_version=AZURE_OPENAI_API_VERSION,
+            azure_deployment=AZURE_OPENAI_LLM_DEPLOYMENT,
+        )
+    else:
+        llm_config = LLMConfig(
             model=GEN_MODEL,
             api_key=DEEPBRICKS_API_KEY,
             base_url=DEEPBRICKS_BASE_URL,
             temperature=0.2,
-            max_tokens=900,
+            max_tokens=4000,
             model_max_token_size=8192,
             model_max_async=10,
             enable_cache=True,
-        ),
+        )
+
+    return RAGEngineConfig(
+        working_dir=str(OUTPUT_DIR),
+        output_dir=str(OUTPUT_DIR),
+        embedding=embedding_config,
+        llm=llm_config,
         vision=vision_config,
         language=LanguageConfig(default_language="zh"),
         pdf_processing=PDFProcessingConfig.from_vision_config(
@@ -201,7 +275,8 @@ def build_knowledge_graph_step1(kb_data: Dict[str, Any], config: RAGEngineConfig
     # ========== Step 3: 实体和关系插入Kuzu ==========
     print("\n[Step 3] 实体和关系存储到Kuzu图数据库...")
     kuzu_store = KuzuGraphStore(KUZU_DIR)
-    kg_builder.store_entities_and_relationships_to_kuzu(kuzu_store, kb_data["content_blocks"])
+    content_blocks_map = {block.id: block for block in content_blocks}
+    kg_builder.store_entities_and_relationships_to_kuzu(kuzu_store, content_blocks_map)
     print("✓ 实体和关系已存储到Kuzu")
     
     # Print statistics
@@ -367,14 +442,20 @@ async def execute_query_workflow(pdf_path: Path) -> None:
         retrieval_pipeline = RetrievalPipeline(config)
         reranker = LocalReranker(OLLAMA_BASE_URL, RERANK_MODEL)
         generator = LocalAnswerGenerator(
-            base_url=DEEPBRICKS_BASE_URL,
-            api_key=DEEPBRICKS_API_KEY,
-            model=GEN_MODEL,
+            base_url=config.llm.base_url,
+            api_key=config.llm.api_key,
+            model=config.llm.model,
+            temperature=config.llm.temperature,
+            max_tokens=config.llm.max_tokens,
+            use_azure=config.llm.use_azure,
+            azure_endpoint=config.llm.azure_endpoint,
+            azure_api_version=config.llm.azure_api_version,
+            azure_deployment=config.llm.azure_deployment,
         )
         
         # Run queries
         queries = [
-            "订单已经被调度过，是否可以修改订单？",
+            "Extract all parameters from the elevator design and output in tables sorted by dimensions.",
         ]
         
         outputs = []
@@ -437,9 +518,14 @@ def main() -> None:
     print("Hybrid PDF RAG Demo - 模块化架构")
     print("=" * 88)
     print(f"PDF 数据源: {pdf_path}")
-    print(f"Embedding 模型: {EMBED_MODEL}")
+    print(f"Embedding 模型: {AZURE_OPENAI_EMBEDDING_DEPLOYMENT if EMBEDDING_USE_AZURE else EMBED_MODEL}"
+          f"{' [Azure]' if EMBEDDING_USE_AZURE else ''}")
     print(f"Rerank 模型: {RERANK_MODEL}")
-    print(f"生成模型: {GEN_MODEL}")
+    print(f"生成模型: {AZURE_OPENAI_LLM_DEPLOYMENT if LLM_USE_AZURE else GEN_MODEL}"
+          f"{' [Azure]' if LLM_USE_AZURE else ''}")
+    print(f"Vision 提供方: {'azure' if VISION_USE_AZURE else VISION_PROVIDER}")
+    if USE_AZURE_OPENAI or LLM_USE_AZURE or EMBEDDING_USE_AZURE or VISION_USE_AZURE:
+        print(f"Azure Endpoint: {AZURE_OPENAI_ENDPOINT}  (api_version={AZURE_OPENAI_API_VERSION})")
     print("\n执行标志:")
     print(f"  UPDATE_KB (文档处理+知识库+知识图谱): {UPDATE_KB}")
     print(f"  UPDATE_KG (从 Chroma 重建知识图谱):   {UPDATE_KG}")

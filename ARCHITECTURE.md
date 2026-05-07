@@ -1,356 +1,302 @@
-# 新架构设计文档
+# Architecture
 
-## 架构概览
-
-### 分层架构
+## Layered Overview
 
 ```
-┌─────────────────────────────────────────────────┐
-│           Application & Examples                │
-│  (examples/hybrid_pdf_rag_chroma_kuzu.py)      │
-└────────────────┬────────────────────────────────┘
-                 │
-┌────────────────▼────────────────────────────────┐
-│           Pipeline Layer (新)                   │
-│ ┌──────────────────────────────────────────┐  │
-│ │ DocumentProcessor   → content blocks     │  │
-│ │ KnowledgeBaseBuilder → embeddings       │  │
-│ │ KnowledgeGraphBuilder → entities/rels   │  │
-│ │ RetrievalPipeline → results/answer      │  │
-│ └──────────────────────────────────────────┘  │
-└────────────────┬────────────────────────────────┘
-                 │
-┌────────────────▼────────────────────────────────┐
-│           Storage Layer (新)                    │
-│ ┌──────────────────────────────────────────┐  │
-│ │ ChromaKnowledgeBase    (独立)            │  │
-│ │ KuzuGraphStore         (独立)            │  │
-│ └──────────────────────────────────────────┘  │
-└────────────────┬────────────────────────────────┘
-                 │
-┌────────────────▼────────────────────────────────┐
-│        External Services (已有)                 │
-│ ┌──────────────────────────────────────────┐  │
-│ │ Chroma DB | Kuzu DB | LLM | Embedding   │  │
-│ └──────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                Application & Examples                    │
+│  examples/hybrid_pdf_rag_chroma_kuzu.py (featured)       │
+│  examples/bm25_demo.py, multilingual_rag_example.py, ... │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────┐
+│                     Pipeline Layer                       │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ DocumentProcessor      → Document + chunks        │  │
+│  │ KnowledgeBaseBuilder   → embeddings, Chroma       │  │
+│  │ KnowledgeGraphBuilder  → entities, relations, KG  │  │
+│  │ RetrievalPipeline      → retrieve → rerank → gen  │  │
+│  └────────────────────────────────────────────────────┘  │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────┐
+│                     Storage Layer                        │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ ChromaKnowledgeBase  (vectors + BM25 + entities)  │  │
+│  │ KuzuGraphStore       (LPG graph DB)               │  │
+│  └────────────────────────────────────────────────────┘  │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────┐
+│                  Retrieval & Support                     │
+│  HybridRetriever | BM25Retriever | HybridFuser           │
+│  Rerankers (Simple / CrossEncoder / LLM / Hybrid)        │
+│  Embeddings (OpenAI / Azure / Ollama via OpenAI-compat)  │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────┐
+│                External Services                         │
+│  Chroma DB | Kuzu DB | OpenAI | Azure OpenAI | Gemini    │
+│  Ollama (local LLM/embeddings/reranker)                  │
+└──────────────────────────────────────────────────────────┘
 ```
 
-## 模块详情
+The two key invariants of the architecture:
 
-### Pipeline Layer
+1. **Storage classes are fully decoupled.** `ChromaKnowledgeBase` and `KuzuGraphStore` know nothing about the pipeline or the engine. They can be instantiated standalone and operated directly.
+2. **Pipeline modules are independent.** Each can run on its own input and produce its own output. This is what makes workflows like "rebuild the KG from existing Chroma chunks without touching the PDF" possible.
 
-#### DocumentProcessor
+## Pipeline Layer
+
+### DocumentProcessor (`rag_engine/pipeline/document_processor.py`)
 ```python
 DocumentProcessor
-  ├── process_document(file_path) → Document
-  ├── process_folder(folder_path) → List[Document]
+  ├── process_document(file_path, doc_id=None, doc_title=None,
+  │                    language=None, markdown_path=None) → Document
+  ├── process_folder(folder_path, language=None, recursive=True) → List[Document]
   └── _process_content_blocks(document)
 ```
+**Dependencies**: `ParserFactory`, `ProcessorFactory`
+**Responsibilities**: parse a file, extract content blocks, run modal processors, produce a `Document` with `chunks`.
+**Properties**: pure input → output, no side effects on storage.
 
-依赖：
-- ParserFactory (已有)
-- ProcessorFactory (已有)
-
-职责：
-- 解析各种格式的文档
-- 提取内容块
-- 应用处理器进行块增强
-
-特点：
-- 单纯的文件输入，没有副作用
-- 返回结构化的 Document 对象
-- 支持多种文件格式
-
-#### KnowledgeBaseBuilder
+### KnowledgeBaseBuilder (`rag_engine/pipeline/knowledge_base_builder.py`)
 ```python
 KnowledgeBaseBuilder
   ├── build_from_document(document)
   ├── build_from_blocks(blocks)
   ├── rebuild_chroma(chroma_kb)
-  ├── get_embeddings() → Dict[str, List[float]]
-  └── get_content_blocks() → Dict[str, ContentBlock]
+  ├── get_embeddings()       → Dict[chunk_id, List[float]]
+  └── get_content_blocks()   → Dict[chunk_id, ContentBlock]
 ```
+**Dependencies**: `OpenAIEmbedding` (or Azure / Ollama via the same OpenAI-compatible interface)
+**Responsibilities**: generate embeddings for chunks; coordinate a Chroma rebuild.
+**Properties**: embeddings are computed in memory and held on the builder, so a Chroma rebuild can be inspected or repeated without re-embedding.
 
-依赖：
-- OpenAIEmbedding (已有)
-
-职责：
-- 生成向量嵌入
-- 管理内容块和向量的对应关系
-- 协调 Chroma DB 重建
-
-特点：
-- 所有计算都是可观测的
-- 支持分步操作（先构建，后重建）
-- 嵌入向量完全可访问
-
-#### KnowledgeGraphBuilder
+### KnowledgeGraphBuilder (`rag_engine/pipeline/knowledge_graph_builder.py`)
+The KG building uses a **three-step flow**:
 ```python
 KnowledgeGraphBuilder
-  ├── build_from_document(document)
-  ├── build_from_blocks(blocks)
-  ├── rebuild_kuzu(kuzu_store)
-  ├── rebuild_kuzu_from_chroma_chunks(kuzu_store, chunks)  # 🆕
-  ├── get_entities() → Dict[str, Entity]
-  ├── get_relationships() → Dict[str, Relationship]
-  └── get_graph_stats() → Dict
+  ├── merge_chunks_by_token_size(chunks, max_tokens=4096) → List[ContentBlock]
+  ├── extract_entities_and_relationships(blocks)          → (entities, relationships)   # Step 1: LLM
+  ├── embed_entities_and_store_to_chroma(entities, chroma_kb)                            # Step 2: vectors
+  ├── store_entities_and_relationships_to_kuzu(kuzu_store, content_blocks)               # Step 3: graph DB
+  ├── build_from_document(document)             # Convenience wrapper for steps 1–3
+  ├── build_from_blocks(blocks)                 # Same, from prepared blocks
+  ├── rebuild_kuzu(kuzu_store)                  # Reload current entities/relations into Kuzu
+  ├── rebuild_kuzu_from_chroma_chunks(...)      # Stateless rebuild from Chroma data
+  ├── rebuild_kuzu_from_extracted_data(kuzu_store)
+  ├── rebuild_entities_chroma(chroma_kb)
+  ├── get_entities() / get_relationships() / get_graph_stats()
 ```
+**Dependencies**: `EntityExtractor`, `RelationshipBuilder`, `KnowledgeGraph` (in-memory model), `OpenAIEmbedding` for entity vectors
+**Properties**: supports two rebuild paths — from a `Document` (with chunks) or from existing Chroma chunks — so the KG can be iterated without reprocessing PDFs.
 
-依赖：
-- EntityExtractor (已有)
-- RelationshipBuilder (已有)
-- KnowledgeGraph (已有)
-
-职责：
-- 提取实体和关系
-- 管理知识图谱
-- 协调 Kuzu DB 重建
-
-特点：
-- ✨ 支持两种重建方式（从 document 或从 Chroma）
-- 实体和关系完全可访问
-- 支持图统计信息查询
-
-#### RetrievalPipeline
+### RetrievalPipeline (`rag_engine/pipeline/retrieval_pipeline.py`)
 ```python
 RetrievalPipeline
-  ├── retrieve_hybrid(query, chroma_kb, kuzu_store, ...) → List[RetrievalResult]
-  └── run_query(query, chroma_kb, kuzu_store, ...) → Dict
+  ├── retrieve_hybrid(query, chroma_kb, kuzu_store, top_k, ...) → List[RetrievalResult]
+  └── run_query(query, chroma_kb, kuzu_store, reranker, generator, top_k) → Dict
 ```
+Bundled helpers:
+- `LocalReranker(base_url, model)` — Ollama-style reranker
+- `LocalAnswerGenerator(base_url, api_key, model, ...)` — OpenAI-compatible (also supports Azure)
 
-包含：
-- LocalReranker
-- LocalAnswerGenerator
+**Responsibilities**: vectorize the query, run Chroma + Kuzu searches in parallel, fuse and dedupe results, rerank, and synthesize an answer.
 
-职责：
-- 协调向量和图搜索
-- 合并和去重结果
-- Reranking
-- 答案生成
+## Storage Layer
 
-特点：
-- 完全解耦的检索组件
-- 支持灵活的排序和生成配置
-
-### Storage Layer
-
-#### ChromaKnowledgeBase
+### ChromaKnowledgeBase (`rag_engine/storage/chroma_kb.py`)
 ```python
 ChromaKnowledgeBase
   ├── __init__(db_path)
   ├── get_or_create_collection(name)
-  ├── rebuild(content_blocks, embeddings, collection_name)
-  ├── search(query_vector, top_k, collection_name) → List[RetrievalResult]
+  ├── rebuild(chunks, embeddings)                    # full vector index rebuild
+  ├── rebuild_entities(entities, embeddings)         # entity index for graph search
+  ├── build_bm25_index_from_chroma()                 # extract docs from Chroma → BM25 → bm25_index.pkl
+  ├── search(query_vector, top_k)                    → List[RetrievalResult]
+  ├── search_bm25(query, top_k)                      → List[RetrievalResult]
+  ├── search_entities(query_vector, top_k)           → List[RetrievalResult]
   ├── count() → int
-  └── get_all() → Dict (用于 KG 重建)
+  └── get_all(name=None) → {ids, documents, metadatas, embeddings}
 ```
+**Properties**:
+- Self-contained: holds Chroma client, BM25 index, and entity collection in one place.
+- Persistent: BM25 index is pickled next to the Chroma DB.
+- Multi-collection: separate spaces for chunks vs. entities.
+- Exposes `get_all()` so other layers can rebuild from it without re-parsing source files.
 
-特点：
-- ✅ 完全独立，不依赖任何其他组件
-- ✅ 可以单独初始化和使用
-- ✅ 支持多个 collection
-- ✅ 持久化存储
-- ✅ 提供数据导出接口
-
-设计原理：
-- 关注点分离：只处理向量存储
-- 接口简洁：只暴露必要的方法
-- 状态管理：内部维护集合的轻量级状态
-
-#### KuzuGraphStore
+### KuzuGraphStore (`rag_engine/storage/kuzu_graph.py`)
 ```python
 KuzuGraphStore
   ├── __init__(db_path)
-  ├── rebuild_from_entities_and_relationships(entities, relationships, blocks)
-  ├── rebuild_from_chroma_chunks(chunk_ids, documents, metadatas)  # 🆕
-  ├── search(query, entities, content_blocks, top_k) → List[RetrievalResult]
-  ├── get_or_create_collection(name)
-  └── _escape(value) → str
+  ├── close()
+  ├── __enter__() / __exit__()                       # use as context manager
+  ├── rebuild_from_entities_and_relationships(entities, relationships, content_blocks)
+  ├── rebuild_from_chroma_chunks(chunk_ids, documents, embeddings, entities)
+  ├── rebuild_from_extracted_data(entities, relationships)
+  ├── search(query_entities, top_k, n_hop)           → Dict
+  ├── get_all_entities()                             → Dict[id, Entity]
+  ├── _compute_pagerank()                            # entity-importance scoring
+  ├── _ensure_schema() / _clear_and_recreate()
+```
+**Properties**:
+- LPG model with managed schema for nodes (Entity, Chunk) and edges.
+- Multiple rebuild paths (from extractor output, from Chroma data, from in-memory graph).
+- Graph search supports n-hop traversal and PageRank-weighted scoring.
+
+## Retrieval Layer
+
+`rag_engine/retrieval/` provides the building blocks the pipeline uses:
+
+- **Embeddings** — `OpenAIEmbedding` (also handles Azure & Ollama via OpenAI-compatible base URL)
+- **HybridRetriever** — top-level vector + BM25 retriever
+- **BM25Retriever** — pure full-text search with `rank_bm25`
+- **ScoreNormalizer** — `minmax`, `sigmoid`, `rank` normalization for cross-channel score fusion
+- **HybridFuser** — `weighted_avg`, `rrf`, `max`, `min` fusion strategies, with optional dedup
+- **Rerankers** — `SimpleReranker`, `CrossEncoderReranker`, `LLMReranker`, `HybridReranker`
+- **ContextExtractor** — pulls surrounding chunks/entities for prompting; cached via `ContextCache`
+
+## Data Flows
+
+### Workflow A: Full processing (`UPDATE_KB=true`)
+```
+PDF → DocumentProcessor → Document(chunks)
+                            │
+        ┌───────────────────┼─────────────────────────┐
+        ▼                   ▼                         ▼
+  KBBuilder            KGBuilder                (kept on the builders)
+    embeddings         merge_chunks_by_token_size
+    content_blocks     extract_entities_and_relationships  (Step 1)
+        │              embed_entities_and_store_to_chroma  (Step 2)
+        │              store_entities_and_relationships_to_kuzu (Step 3)
+        ▼                   │
+  ChromaKnowledgeBase ◀─────┘
+    .rebuild(chunks, embeddings)
+                                                 ▼
+                                          KuzuGraphStore
 ```
 
-特点：
-- ✅ 完全独立，不依赖任何其他组件
-- ✅ 支持两种重建方式
-- ✨ 新特性：可以从 Chroma 数据直接重建（无需文档处理！）
-- ✅ 基于关键词和邻接的混合搜索
-- ✅ 持久化存储
-
-设计原理：
-- 灵活的重建机制
-- 支持多种数据源
-- 查询优化（支持邻接遍历）
-
-## 数据流
-
-### 工作流 A: 完整处理（UPDATE_KB）
+### Workflow B: Stateless KG rebuild (`UPDATE_KG=true`, `UPDATE_KB=false`)
 ```
-PDF File
-   │
-   ▼
-DocumentProcessor
-   │ → Document (with content blocks)
-   │
-   ├─────────────────────┬───────────────────┐
-   │                     │                   │
-   ▼                     ▼                   ▼
-KBBuilder            KGBuilder          (data collection)
-   │                    │
-   ├─ embeddings        ├─ entities
-   └─ content blocks    └─ relationships
-   │                    │
-   ▼                    ▼
-ChromaKnowledgeBase  KuzuGraphStore
-   │                    │
-   ▼                    ▼
-Chroma DB            Kuzu DB
+ChromaKnowledgeBase.get_all()  →  {chunk_ids, documents, metadatas}
+                │
+                ▼
+    Chunk objects → KGBuilder.merge_chunks_by_token_size
+                  → extract_entities_and_relationships (LLM)
+                  → embed_entities_and_store_to_chroma
+                  → store_entities_and_relationships_to_kuzu
 ```
+**Why this matters**: iterate KG-extraction logic without re-parsing PDFs or recomputing chunk embeddings.
 
-### 工作流 B: 独立 KG 重建（UPDATE_KG）✨
+### Workflow C: BM25 rebuild (`BUILD_BM25=true`)
 ```
-Chroma DB
-   │
-   ▼
 ChromaKnowledgeBase.get_all()
-   │ → {chunk_ids, documents, metadatas}
-   │
-   ▼
-KnowledgeGraphBuilder.rebuild_kuzu_from_chroma_chunks()
-   │
-   ▼
-KuzuGraphStore
-   │
-   ▼
-Kuzu DB
-
-✨ 优势：
-- 无需重新处理 PDF
-- 无需重新生成 embeddings
-- 只需要 Chroma 中已有的数据
-- 支持快速迭代 KG 构建逻辑
+        │
+        ▼
+ChromaKnowledgeBase.build_bm25_index_from_chroma()
+        │
+        ▼
+bm25_index.pkl  (next to chroma.sqlite3)
 ```
 
-### 工作流 C: 查询执行（EXECUTE_QUERY）
+### Workflow D: Query (`EXECUTE_QUERY=true`)
 ```
 Query
-   │
-   ▼
-RetrievalPipeline.run_query()
-   │
-   ├─────────────────┬────────────────┐
-   │                 │                │
-   ▼                 ▼                ▼
-ChromaKnowledgeBase KuzuGraphStore (metadata)
-   │                 │                │
-   └─────────────┬───┘                │
-                 │                    │
-                 ▼                    ▼
-         Merged Results        LocalReranker
-                 │
-                 ▼
-         LocalAnswerGenerator
-                 │
-                 ▼
-            Answer
+  │
+  ▼
+RetrievalPipeline.run_query
+  │
+  ├─ Chroma.search       (vector)
+  ├─ Chroma.search_bm25  (BM25)
+  └─ Kuzu.search         (graph, n-hop + PageRank)
+  │
+  ▼
+HybridFuser  (weighted_avg / rrf / max / min, normalized, deduped)
+  │
+  ▼
+Reranker (Simple / CrossEncoder / LLM / Hybrid)
+  │
+  ▼
+LocalAnswerGenerator → Answer
 ```
 
-## 关键设计决策
+## Configuration
 
-### 1. 完全的存储层解耦
-**决策**: ChromaKnowledgeBase 和 KuzuGraphStore 完全独立
-**理由**:
-- 支持单独初始化和使用
-- 便于替换实现（如 Pinecone、Neo4j）
-- 更容易测试
+`RAGEngineConfig` aggregates the dataclasses below; every field has an env-var default. See [README.md](README.md) for the full table.
 
-**示例**:
+- `EmbeddingConfig`, `LLMConfig`, `VisionConfig` — model providers (OpenAI, Azure OpenAI, Gemini for vision)
+- `LanguageConfig` — 7 supported languages (`en`, `zh`, `ja`, `ko`, `es`, `fr`, `de`)
+- `PDFProcessingConfig` — layout, image/table extraction, header/footer filtering
+- `ProcessingConfig` — `chunker_type` (`title` or `token`), chunk sizes, worker counts, token budgets
+- `BM25Config` — k1, b, language, min token length
+- `HybridRetrievalConfig` — fusion strategy, weights, normalization, RRF k, dedup
+- `RerankerConfig` — model selection and top-k pre/post rerank
+- `StorageConfig` — cosine threshold, related-chunk count, max graph nodes
+
+### Azure OpenAI
+A single `USE_AZURE_OPENAI=true` switches LLM, embedding, and vision to Azure simultaneously. Each component has an independent override (`LLM_USE_AZURE`, `EMBEDDING_USE_AZURE`, `VISION_USE_AZURE`) and its own deployment env var.
+
+## Key Design Decisions
+
+### 1. Decoupled storage
+**Decision**: `ChromaKnowledgeBase` and `KuzuGraphStore` are independent of pipeline and engine.
+**Rationale**: enables standalone use, easy backend substitution (Pinecone, Neo4j…), and unit testing without spinning up the engine.
 ```python
-# 直接使用，无需 engine
-chroma = ChromaKnowledgeBase(path)
-results = chroma.search(vector, top_k=5)
+chroma = ChromaKnowledgeBase("./chroma_db")
+results = chroma.search(vector, top_k=5)   # works on its own
 ```
 
-### 2. 两种 KG 重建方式
-**决策**: `rebuild_kuzu()` 和 `rebuild_kuzu_from_chroma_chunks()`
-**理由**:
-- 支持从不同数据源重建
-- 不同的使用场景
-- 无需重复处理标记
-
-**示例**:
+### 2. Multiple KG rebuild paths
+**Decision**: KG can be rebuilt from a `Document`, from existing Chroma chunks, or from extractor output.
+**Rationale**: separates expensive PDF parsing/embedding from cheap KG iteration.
 ```python
-# 方式 1：从实体/关系重建
-kg_builder.rebuild_kuzu(kuzu_store)
+# From a parsed document
+kg_builder.build_from_document(doc)
 
-# 方式 2：从 Chroma 数据重建（新特性！）
-kg_builder.rebuild_kuzu_from_chroma_chunks(kuzu_store, chunks)
+# From data already sitting in Chroma — no PDF reprocessing
+kg_builder.rebuild_kuzu_from_chroma_chunks(...)
 ```
 
-### 3. Pipeline 组件的独立性
-**决策**: DocumentProcessor, KBBuilder, KGBuilder 可单独使用
-**理由**:
-- 支持灵活的工作流
-- 每个组件可以独立测试
-- 支持增量更新
+### 3. BM25 alongside vectors
+**Decision**: BM25 lives next to the Chroma index and is built from the same chunks.
+**Rationale**: deterministic full-text search complements the noisy semantic channel; together they yield more reliable hybrid retrieval. The index is persistent (`bm25_index.pkl`), so building it is a one-time cost.
 
-**示例**:
+### 4. Workflow flags in the featured example
+**Decision**: `hybrid_pdf_rag_chroma_kuzu.py` exposes four boolean flags (`UPDATE_KB`, `UPDATE_KG`, `BUILD_BM25`, `EXECUTE_QUERY`).
+**Rationale**: each step is independently expensive (parsing, LLM extraction, embedding, querying). Flags let you re-run just the parts that changed.
+
+### 5. Three-step KG flow
+**Decision**: explicit Step 1 (LLM extract) → Step 2 (entity embeddings → Chroma) → Step 3 (entities + relations → Kuzu).
+**Rationale**: each step is observable, testable, and replaceable. Entity vectors live next to chunk vectors in Chroma so graph search can fall back to similarity when needed.
+
+## Backwards Compatibility
+
+The high-level `RAGEngine` API is preserved and now delegates internally to the pipeline modules:
 ```python
-# 只处理文档，不构建 KB/KG
-processor = DocumentProcessor(config)
-doc = processor.process_document("file.pdf")
-
-# 只构建 KB，不构建 KG
-kb_builder = KnowledgeBaseBuilder(config)
-kb_builder.build_from_document(doc)
-
-# 独立存储
-chroma.rebuild(kb_builder.get_content_blocks(), kb_builder.get_embeddings())
-```
-
-## 扩展点
-
-### 添加新的存储后端
-1. 继承 `ChromaKnowledgeBase` 的接口
-2. 实现 `rebuild()` 和 `search()`
-3. 更新 `KnowledgeBaseBuilder.rebuild_*()` 方法
-
-### 添加新的检索策略
-1. 在 `RetrievalPipeline` 中添加新方法
-2. 支持不同的合并和排序策略
-3. 可选的重新排序器
-
-### 自定义 KG 构建
-1. 继承 `KnowledgeGraphBuilder`
-2. 重写 `build_from_blocks()` 方法
-3. 自定义实体和关系提取
-
-## 性能特性
-
-| 操作 | 复杂度 | 备注 |
-|------|--------|------|
-| 文档处理 | O(n) | n = 文本大小 |
-| 嵌入生成 | O(n * d) | d = embedding 维度 |
-| 向量搜索 | O(log n) | HNSW 索引 |
-| 图搜索 | O(e) | e = 输出结果数 |
-| 重新排序 | O(n log n) | n = 候选结果数 |
-
-## 向后兼容性
-
-所有现有的 `RAGEngine` API 仍然有效：
-```python
-# OLD API - 继续支持
 engine = RAGEngine(config)
 engine.process_document("file.pdf")
 engine.build_knowledge_graph_for_document(document)
 engine.index_content_blocks(blocks)
 engine.query("question")
-
-# 内部实现已委托给新模块，但 API 保持不变
 ```
 
-## 迁移路径
+For new code, prefer the modular pipeline API directly — it is more flexible and observable.
 
-1. **立即（无需修改）**：现有代码继续使用 RAGEngine API
-2. **短期（推荐）**：尝试模块化 API，享受灵活性
-3. **长期（最佳实践）**：完全使用模块化架构
+## Performance Characteristics
 
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| Document parsing | O(n) | n = text size |
+| Embedding | O(n · d) | d = embedding dim, batched |
+| Vector search | O(log n) | Chroma HNSW index |
+| BM25 search | O(q · postings) | rank_bm25, in-memory |
+| Graph search | O(e + h) | e = entities matched, h = hop expansion |
+| Reranking | O(k log k) | k = candidates after fusion |
+
+## Extension Points
+
+- **Storage backend**: implement the `ChromaKnowledgeBase` / `KuzuGraphStore` surface and update the matching builder.
+- **Retrieval / fusion**: add a method on `RetrievalPipeline` or extend `HybridFuser`.
+- **KG extraction**: subclass `KnowledgeGraphBuilder` and override `extract_entities_and_relationships`.
+- **Parser / processor**: add a `BaseParser` / `BaseModalProcessor` subclass and register it with the corresponding factory.

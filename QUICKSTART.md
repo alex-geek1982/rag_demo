@@ -1,183 +1,211 @@
-# RAG Engine - Quick Start Guide
+# RAG Engine — Quick Start
 
-## 🚀 5分钟快速开始
+A 5-minute path from an empty checkout to a working hybrid PDF RAG pipeline.
 
-### 1. 环境准备
+## 1. Prerequisites
 
-```bash
-# 复制环境配置
-cp .env.example .env
+- Python 3.10+
+- An API key for one of: OpenAI, DeepBricks, Azure OpenAI, or Google Gemini
+- (Optional) [Ollama](https://ollama.ai) for local embedding/reranking
 
-# 编辑 .env 文件，填入您的 OpenAI API 密钥
-# OPENAI_API_KEY=sk-your-key-here
-```
-
-### 2. 安装依赖
+## 2. Install
 
 ```bash
-# 使用 pip 安装
 pip install -e .
-
-# 或使用 uv 安装（推荐）
-# curl -LsSf https://astral.sh/uv/install.sh | sh
-# uv sync
+# or, with dev tools
+pip install -e ".[dev]"
 ```
 
-### 3. 运行示例
+## 3. Configure
 
 ```bash
-# 基础示例
-python examples/basic_example.py
-
-# 多模态示例
-python examples/multimodal_example.py
-
-# 多语言示例
-python examples/multilingual_example.py
+cp .env.example .env
+# Edit .env with one of the provider configs below
 ```
 
-## 📖 核心概念理解
-
-### 什么是 RAG？
-Retrieval Augmented Generation（检索增强生成）是一种将信息检索和文本生成结合的技术：
-1. **检索 (Retrieval)**: 从知识库中找到相关信息
-2. **增强 (Augmentation)**: 用这些信息补充提示
-3. **生成 (Generation)**: 基于增强后的提示生成答案
-
-### RAG Engine 的优势
-
-| 特性 | 说明 |
-|------|------|
-| 🎯 多模态 | 同时处理文本、图像、表格、公式等 |
-| 🧠 知识图谱 | 自动构建实体和关系 |
-| 🔍 混合检索 | 向量+图谱的混合检索 |
-| 🌍 多语言 | 7种语言原生支持 |
-| 📦 无依赖 | 不依赖其他 RAG 框架，完全基于 LLamaIndex |
-
-## 💡 常见使用场景
-
-### 场景1: 文档问答系统
-
-```python
-# 1. 处理文档
-engine.process_folder("./documents/")
-
-# 2. 用户提问
-result = engine.query("文档中的主要内容是什么?")
-
-# 3. 获取答案
-print(result.answer)
+### OpenAI / DeepBricks (default)
+```bash
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
-### 场景2: 多语言知识库
-
-```python
-# 处理英文文档
-engine.process_document("english_doc.pdf", language="en")
-
-# 处理中文文档
-engine.process_document("chinese_doc.txt", language="zh")
-
-# 双语查询
-en_result = engine.query("What is AI?", language="en")
-zh_result = engine.query("什么是人工智能?", language="zh")
+### Azure OpenAI (one-line switch)
+```bash
+USE_AZURE_OPENAI=true
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
+AZURE_OPENAI_API_VERSION=2024-08-01-preview
+AZURE_OPENAI_LLM_DEPLOYMENT=gpt-4o
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
+AZURE_OPENAI_VISION_DEPLOYMENT=gpt-4o
 ```
 
-### 场景3: 研究论文分析
+### Gemini Vision (PDF image analysis only)
+```bash
+VISION_PROVIDER=gemini
+GEMINI_API_KEY=AIza...
+```
 
+## 4. Run the Featured Example
+
+```bash
+python examples/hybrid_pdf_rag_chroma_kuzu.py
+```
+
+This processes a sample PDF end-to-end:
+1. Parse the PDF (with optional Vision-based image understanding)
+2. Chunk and embed
+3. Index into **Chroma** (vector + BM25)
+4. Extract entities & relationships with the LLM
+5. Embed entities (back into Chroma) and write the graph to **Kuzu**
+6. Run a hybrid query (vector + BM25 + graph) → rerank → answer
+
+### Toggle individual stages
+
+The example respects four boolean env flags:
+
+```bash
+# Re-query an already-built DB without reprocessing anything
+UPDATE_KB=false UPDATE_KG=false BUILD_BM25=false EXECUTE_QUERY=true \
+  python examples/hybrid_pdf_rag_chroma_kuzu.py
+
+# Iterate on the KG extraction logic without re-parsing the PDF
+UPDATE_KB=false UPDATE_KG=true BUILD_BM25=false EXECUTE_QUERY=false \
+  python examples/hybrid_pdf_rag_chroma_kuzu.py
+
+# Just (re)build the BM25 index
+UPDATE_KB=false UPDATE_KG=false BUILD_BM25=true EXECUTE_QUERY=false \
+  python examples/hybrid_pdf_rag_chroma_kuzu.py
+```
+
+| Flag | What it does |
+|------|--------------|
+| `UPDATE_KB` | Parse PDF → embeddings → Chroma + KG |
+| `UPDATE_KG` | Stateless KG rebuild from existing Chroma chunks |
+| `BUILD_BM25` | Build BM25 index from Chroma chunks |
+| `EXECUTE_QUERY` | Hybrid retrieval → rerank → answer |
+
+## 5. Run Other Examples
+
+```bash
+python examples/basic_example.py                  # Minimal end-to-end RAG
+python examples/bm25_demo.py                      # BM25 standalone
+python examples/hybrid_retrieval_example.py       # Vector + BM25 fusion
+python examples/multilingual_rag_example.py       # Cross-lingual retrieval
+python examples/gemini_pdf_rag_example.py         # Gemini Vision for PDFs
+python examples/pdf_processing_example.py         # Advanced PDF parser
+python examples/advanced_chunking_example.py      # TitleChunker hierarchy
+python examples/lightrag_kg_example.py            # LightRAG-style KG
+python examples/multimodal_example.py             # Mixed text + images + tables
+```
+
+## 6. Programmatic Use
+
+### Modular pipeline (preferred)
 ```python
-# 处理论文
-engine.process_document("research_paper.pdf")
+from rag_engine.config import RAGEngineConfig
+from rag_engine.pipeline import (
+    DocumentProcessor, KnowledgeBaseBuilder, KnowledgeGraphBuilder,
+)
+from rag_engine.storage import ChromaKnowledgeBase, KuzuGraphStore
 
-# 关键问题
-result = engine.query(
-    "这篇论文的主要贡献是什么?",
-    top_k=5,
-    use_graph=True
+config = RAGEngineConfig.from_env()
+
+doc = DocumentProcessor(config).process_document("paper.pdf", language="en")
+
+kb = KnowledgeBaseBuilder(config)
+kb.build_from_document(doc)
+chroma = ChromaKnowledgeBase("./output/chroma_db")
+kb.rebuild_chroma(chroma)
+
+kg = KnowledgeGraphBuilder(config)
+blocks = kg.merge_chunks_by_token_size(doc.chunks)
+entities, rels = kg.extract_entities_and_relationships(blocks)
+kg.embed_entities_and_store_to_chroma(entities, chroma)
+
+kuzu = KuzuGraphStore("./output/kuzu_db")
+kg.store_entities_and_relationships_to_kuzu(kuzu, {b.id: b for b in blocks})
+
+chroma.build_bm25_index_from_chroma()
+```
+
+### Querying
+```python
+import asyncio
+from rag_engine.pipeline.retrieval_pipeline import (
+    RetrievalPipeline, LocalReranker, LocalAnswerGenerator,
 )
 
-# 获取源文献
-for doc in result.retrieved_docs:
-    print(f"- {doc.content[:100]}... (score: {doc.score:.2f})")
+pipeline = RetrievalPipeline(config)
+reranker = LocalReranker("http://localhost:11434", "qllama/bge-reranker-v2-m3:q4_k_m")
+generator = LocalAnswerGenerator(
+    base_url=config.llm.base_url,
+    api_key=config.llm.api_key,
+    model=config.llm.model,
+)
+
+result = asyncio.run(pipeline.run_query(
+    query="What is the main contribution?",
+    chroma_kb=chroma,
+    kuzu_store=kuzu,
+    reranker=reranker,
+    generator=generator,
+    top_k=5,
+))
+print(result["answer"])
 ```
 
-## 🔧 故障排查
+### High-level API
+```python
+from rag_engine.core import RAGEngine
+from rag_engine.config import RAGEngineConfig
 
-### 问题: ImportError
-
+engine = RAGEngine(RAGEngineConfig.from_env())
+engine.process_document("paper.pdf")
+print(engine.query("What is the main contribution?").answer)
 ```
-ModuleNotFoundError: No module named 'openai'
-```
 
-**解决方案**: 安装完整依赖
+## 7. Common Tweaks
+
+| Goal | Env var | Value |
+|------|---------|-------|
+| Use token-based chunking | `CHUNKER_TYPE` | `token` (default `title`) |
+| Bigger chunks | `CHUNK_SIZE` / `CHUNK_OVERLAP` | e.g. `2048` / `400` |
+| Disable BM25 | `ENABLE_BM25` | `false` |
+| Switch fusion strategy | `FUSION_STRATEGY` | `rrf`, `weighted_avg`, `max`, `min` |
+| Adjust channel weights | `VECTOR_WEIGHT` / `BM25_WEIGHT` / `GRAPH_WEIGHT` | sum to 1.0 (auto-normalized otherwise) |
+| Cross-encoder reranker | `RERANK_MODEL` | `cross-encoder` |
+| Stronger reranker | `RERANK_MODEL` | `llm` or `hybrid` |
+| Skip header/footer in PDFs | `PDF_FILTER_HEADER_FOOTER` | `true` (default) |
+| Default language | `LANGUAGE` | `en`, `zh`, `ja`, `ko`, `es`, `fr`, `de` |
+
+See [README.md](README.md) for the full configuration reference.
+
+## 8. Troubleshooting
+
+### `ModuleNotFoundError: No module named 'openai'`
 ```bash
 pip install -e .
-# 或
-pip install openai llama-index
 ```
 
-### 问题: API 密钥错误
-
-```
-AuthenticationError: Invalid API key
-```
-
-**解决方案**: 检查 .env 文件中的密钥
+### `AuthenticationError: Invalid API key`
+Confirm the right env var is set for the provider you're using:
 ```bash
-# 确认设置正确
-cat .env | grep OPENAI_API_KEY
-
-# 测试连接
-python -c "from openai import OpenAI; print('OK')"
+grep -E "OPENAI_API_KEY|AZURE_OPENAI_API_KEY|GEMINI_API_KEY|DEEPBRICKS_API_KEY" .env
 ```
 
-### 问题: 文件解析失败
+### `Chroma DB exists, but no data`
+You ran a workflow that depends on existing data without first running `UPDATE_KB=true`. Run the full pipeline once, then disable `UPDATE_KB` to iterate.
 
-```
-ValueError: No parser found for file
-```
+### Kuzu DB lock or schema errors
+Delete `output/<demo>/kuzu_db` and re-run with `UPDATE_KG=true` (or `UPDATE_KB=true`).
 
-**解决方案**: 确保文件格式被支持
-- ✅ PDF, DOCX, XLSX, TXT, MD, JPG, PNG
-- ❌ 其他格式需要自定义解析器
+### `ValueError: No parser found for file`
+Supported formats are PDF, DOCX, XLSX, JPG/PNG/GIF, TXT, MD. To add a new format, subclass `BaseParser` and register it with `ParserFactory` (see [ARCHITECTURE.md](ARCHITECTURE.md#extension-points)).
 
-## 📚 学习路径
+## 9. Next Steps
 
-1. **初级**: 运行示例，理解基础概念
-2. **中级**: 修改配置，处理自己的文档
-3. **高级**: 自定义处理器，扩展功能
-4. **专家**: 贡献代码，参与开发
-
-## 🎓 深入学习
-
-### 推荐阅读
-
-1. [README.md](README.md) - 项目概览
-2. [USAGE_GUIDE.md](USAGE_GUIDE.md) - 详细使用指南
-3. [Code Examples](examples/) - 完整代码示例
-
-### 相关资源
-
-- [LLamaIndex 文档](https://docs.llamaindex.ai)
-- [OpenAI API 文档](https://platform.openai.com/docs)
-- [RAG 论文和研究](https://arxiv.org/)
-
-## 💬 获取帮助
-
-### 联系方式
-
-- 📧 提交 Issue: 在 GitHub 上报告问题
-- 💬 讨论: 参与社区讨论
-- 📖 文档: 查看详细文档
-
-## 🎉 下一步
-
-现在您已经了解了基础知识，可以：
-
-1. ✅ 处理您的第一个文档
-2. ✅ 尝试多种查询方式
-3. ✅ 探索多语言功能
-4. ✅ 自定义配置参数
-5. ✅ 贡献您的想法和代码
-
-祝您使用愉快！ 🚀
+1. Read [ARCHITECTURE.md](ARCHITECTURE.md) for the layered architecture and data flows.
+2. Skim [README.md](README.md) for the full feature & config reference.
+3. Try `examples/hybrid_pdf_rag_chroma_kuzu.py` against your own PDF (set `RAG_PDF_PATH=/path/to/file.pdf`).
+4. Iterate on KG extraction with `UPDATE_KB=false UPDATE_KG=true` — fast feedback loop without re-parsing PDFs.

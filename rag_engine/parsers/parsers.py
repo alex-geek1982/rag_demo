@@ -114,6 +114,9 @@ class PDFParser(BaseParser):
         vision_base_url: Optional[str] = None,
         vision_model: Optional[str] = None,
         vision_provider: str = "openai",
+        vision_azure_endpoint: Optional[str] = None,
+        vision_azure_api_version: Optional[str] = None,
+        vision_azure_deployment: Optional[str] = None,
         context_window_pixels: int = 200,
         min_image_area: int = 1000,
         max_surrounding_text_chars: int = 2000,
@@ -144,6 +147,9 @@ class PDFParser(BaseParser):
         self.vision_base_url = vision_base_url
         self.vision_model = vision_model
         self.vision_provider = vision_provider
+        self.vision_azure_endpoint = vision_azure_endpoint
+        self.vision_azure_api_version = vision_azure_api_version
+        self.vision_azure_deployment = vision_azure_deployment
         self.context_window_pixels = context_window_pixels
         self.min_image_area = min_image_area
         self.max_surrounding_text_chars = max_surrounding_text_chars
@@ -168,6 +174,9 @@ class PDFParser(BaseParser):
                 vision_base_url=self.vision_base_url,
                 vision_model=self.vision_model,
                 vision_provider=self.vision_provider,
+                vision_azure_endpoint=self.vision_azure_endpoint,
+                vision_azure_api_version=self.vision_azure_api_version,
+                vision_azure_deployment=self.vision_azure_deployment,
                 context_window_pixels=self.context_window_pixels,
                 min_image_area=self.min_image_area,
                 max_surrounding_text_chars=self.max_surrounding_text_chars,
@@ -471,7 +480,19 @@ class ParserFactory:
                     or getattr(pdf_config, "vision_provider", None)  # Priority 2: pdf_config.vision_provider
                     or "openai"  # Default
                 )
-                
+                vision_azure_endpoint = (
+                    getattr(pdf_config, "vision_azure_endpoint", None)
+                    or getattr(vision_config, "azure_endpoint", None)
+                )
+                vision_azure_api_version = (
+                    getattr(pdf_config, "vision_azure_api_version", None)
+                    or getattr(vision_config, "azure_api_version", None)
+                )
+                vision_azure_deployment = (
+                    getattr(pdf_config, "vision_azure_deployment", None)
+                    or getattr(vision_config, "azure_deployment", None)
+                )
+
                 parser = parser_class(
                     doc_id,
                     doc_title,
@@ -485,6 +506,9 @@ class ParserFactory:
                     vision_base_url=vision_base_url,
                     vision_model=vision_model,
                     vision_provider=vision_provider,
+                    vision_azure_endpoint=vision_azure_endpoint,
+                    vision_azure_api_version=vision_azure_api_version,
+                    vision_azure_deployment=vision_azure_deployment,
                     context_window_pixels=getattr(pdf_config, "context_window_pixels", 200),
                     min_image_area=getattr(pdf_config, "min_image_area", 1000),
                     max_surrounding_text_chars=getattr(pdf_config, "max_surrounding_text_chars", 2000),

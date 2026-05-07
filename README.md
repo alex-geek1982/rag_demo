@@ -1,410 +1,276 @@
-# RAG Engine - All-in-One Multimodal RAG Framework
+# RAG Engine — Modular Multimodal RAG Framework
 
-> 基于 LLamaIndex 的企业级RAG引擎，完全复制 RAG-Anything 的能力，原生多语言支持
+> A modular, decoupled RAG engine with hybrid retrieval (vector + BM25 + graph), advanced PDF parsing, multilingual support, and pluggable storage backends (Chroma + Kuzu).
 
-## ✨ 核心特性
+## Core Features
 
-### 🎯 多模态处理
-- **文本分析**: 自动提取和处理文本内容
-- **图像处理**: 支持图像识别和VLM分析
-- **表格处理**: 结构化数据解析和索引
-- **数学公式**: LaTeX公式识别与关联
-- **代码块**: 程序代码分析与理解
+### Modular, Decoupled Architecture
+The engine is organized as independent layers that can be composed or used standalone:
 
-### 📄 文档支持
-支持以下格式的自动解析：
-- PDF 文件
-- Word 文档 (.docx, .doc)
-- Excel 表格 (.xlsx, .xls)
-- 图像格式 (.jpg, .png, .gif 等)
-- 文本文件 (.txt, .md)
+- **Pipeline layer** — `DocumentProcessor`, `KnowledgeBaseBuilder`, `KnowledgeGraphBuilder`, `RetrievalPipeline`
+- **Storage layer** — `ChromaKnowledgeBase` (vectors + BM25 + entity index) and `KuzuGraphStore` (LPG graph DB), both fully self-contained
+- **Retrieval layer** — Hybrid fusion (vector + BM25 + graph), multiple normalization and rerank strategies
+- **Parsers / Processors** — Pluggable per-format and per-modality components
 
-### 🧠 智能知识图谱
-- **实体提取**: 自动从文档中提取关键实体
-- **关系构建**: 建立多模态内容之间的关系
-- **图谱遍历**: 支持复杂的关系查询和推理
-- **跨模态链接**: 连接不同类型的内容
+You can run any layer on its own (rebuild a graph from existing Chroma data, build a BM25 index without touching the LLM, etc.).
 
-### 🔍 混合检索
-- **向量检索**: 基于语义的相似度搜索
-- **知识图谱遍历**: 基于实体关系的检索
-- **模态过滤**: 按内容类型过滤结果
-- **相关性排序**: 智能排序和评分
+### Hybrid Retrieval
+- **Vector search** via Chroma (HNSW)
+- **BM25 full-text search** with configurable `k1`, `b`, language, min token length
+- **Graph search** via Kuzu (n-hop entity traversal, PageRank scoring)
+- **Fusion strategies**: weighted average, RRF (Reciprocal Rank Fusion), max, min
+- **Score normalization**: minmax, sigmoid, rank
+- **Deduplication** across channels
 
-### 🌍 真正的多语言支持
-不仅仅是界面翻译，而是**完整的多语言检索和生成**：
+### Multimodal Document Processing
+- **Advanced PDF parser** with layout analysis, image extraction, table detection, header/footer filtering
+- **Vision-based image understanding** with OpenAI, Azure OpenAI, or Google Gemini
+- **Native handlers** for text, images, tables, equations, code
+- **Format support**: PDF, DOCX, XLSX, JPG/PNG/GIF, TXT, MD
 
-- **自动语言检测**: 自动检测文档和查询的语言（7+种语言）
-- **多语言嵌入**: 统一的向量空间支持跨语言检索
-- **跨语言检索**: 用一种语言查询，检索其他语言的相关文档
-- **语言亲和度评分**: 同语言匹配获得15%的相关性提升
-- **元数据追踪**: 保留整个处理流程中的语言信息
-- **支持语言**: 英文、中文、日文、韩文、西班牙文、法文、德文
+### Knowledge Graph
+- **LLM-based entity & relationship extraction** (LightRAG-style multi-turn prompting)
+- **Entity embeddings** stored alongside chunks in Chroma
+- **Persistent graph** in Kuzu with schema-managed nodes and edges
+- **Two rebuild paths**: from a parsed document, or directly from existing Chroma chunks
 
-**示例**：用英文查询，自动获取英文、中文、日文等多语言的相关结果
+### Reranking
+Pluggable rerankers with shared interface:
+- `SimpleReranker` — heuristic
+- `CrossEncoderReranker` — `cross-encoder/ms-marco-MiniLM-L-12-v2` by default
+- `LLMReranker` — LLM-based scoring (Ollama or OpenAI-compatible)
+- `HybridReranker` — combines multiple strategies
 
-详见：[多语言RAG功能说明](MULTILINGUAL_RAG.md)
+### Multilingual Support (7 languages)
+English, Chinese, Japanese, Korean, Spanish, French, German.
+- Automatic language detection via Unicode-range heuristics
+- Multilingual embeddings with language-aware tagging
+- Cross-lingual retrieval (query in one language, retrieve in others)
 
-## 🚀 快速开始
+### Azure OpenAI
+First-class Azure OpenAI support across embedding, LLM, and vision components, with a single `USE_AZURE_OPENAI` master switch and per-component overrides.
 
-### 安装
+## Quick Start
+
+### Install
 ```bash
-# 基础安装
 pip install -e .
-
-# 开发环境
+# or
 pip install -e ".[dev]"
 ```
 
-### 环境配置
+### Configure
 ```bash
-# 复制示例配置
 cp .env.example .env
-
-# 编辑 .env 配置 OpenAI API 密钥
-OPENAI_API_KEY=your_api_key_here
+# Edit .env to set OPENAI_API_KEY (or DEEPBRICKS_API_KEY / AZURE_OPENAI_* / GEMINI_API_KEY)
 ```
 
-### 基础使用
+### Run the featured example
+```bash
+python examples/hybrid_pdf_rag_chroma_kuzu.py
+```
+
+This runs the full pipeline against a sample PDF: parse → chunk → embed → index in Chroma → extract entities/relations with the LLM → embed entities → write to Kuzu → build BM25 index → run a hybrid query.
+
+## Featured Example: hybrid_pdf_rag_chroma_kuzu.py
+
+The example exposes four independent workflow flags so you can run any subset:
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `UPDATE_KB` | `true` | Parse the PDF, build embeddings, rebuild Chroma, then extract entities & write to Kuzu |
+| `UPDATE_KG` | `true` | **Stateless graph rebuild from existing Chroma chunks** — no PDF reprocessing |
+| `BUILD_BM25` | `true` | Read Chroma chunks and build a persistent BM25 index (`bm25_index.pkl`) |
+| `EXECUTE_QUERY` | `true` | Run hybrid retrieval (vector + BM25 + graph) → rerank → generate answer |
+
+Set any to `false` (e.g. `UPDATE_KB=false UPDATE_KG=false BUILD_BM25=false EXECUTE_QUERY=true`) to query an already-built database.
+
+## Programmatic Usage
+
+### Modular pipeline (recommended)
 ```python
-from rag_engine.core import create_engine
+from rag_engine.config import RAGEngineConfig
+from rag_engine.pipeline import (
+    DocumentProcessor,
+    KnowledgeBaseBuilder,
+    KnowledgeGraphBuilder,
+    RetrievalPipeline,
+)
+from rag_engine.storage import ChromaKnowledgeBase, KuzuGraphStore
+
+config = RAGEngineConfig.from_env()
+
+# 1. Parse the document
+doc_processor = DocumentProcessor(config)
+document = doc_processor.process_document("report.pdf", language="en")
+
+# 2. Build vector KB
+kb_builder = KnowledgeBaseBuilder(config)
+kb_builder.build_from_document(document)
+
+chroma_kb = ChromaKnowledgeBase("./output/chroma_db")
+kb_builder.rebuild_chroma(chroma_kb)
+
+# 3. Build knowledge graph
+kg_builder = KnowledgeGraphBuilder(config)
+content_blocks = kg_builder.merge_chunks_by_token_size(document.chunks)
+entities, relationships = kg_builder.extract_entities_and_relationships(content_blocks)
+kg_builder.embed_entities_and_store_to_chroma(entities, chroma_kb)
+
+kuzu_store = KuzuGraphStore("./output/kuzu_db")
+kg_builder.store_entities_and_relationships_to_kuzu(
+    kuzu_store, {b.id: b for b in content_blocks}
+)
+
+# 4. Build BM25
+chroma_kb.build_bm25_index_from_chroma()
+```
+
+### Querying
+```python
+import asyncio
+from rag_engine.pipeline.retrieval_pipeline import (
+    RetrievalPipeline, LocalReranker, LocalAnswerGenerator,
+)
+
+pipeline = RetrievalPipeline(config)
+reranker = LocalReranker("http://localhost:11434", "qllama/bge-reranker-v2-m3:q4_k_m")
+generator = LocalAnswerGenerator(
+    base_url=config.llm.base_url,
+    api_key=config.llm.api_key,
+    model=config.llm.model,
+)
+
+result = asyncio.run(pipeline.run_query(
+    query="What are the key parameters?",
+    chroma_kb=chroma_kb,
+    kuzu_store=kuzu_store,
+    reranker=reranker,
+    generator=generator,
+    top_k=5,
+))
+print(result["answer"])
+```
+
+### High-level RAGEngine API (still supported)
+```python
+from rag_engine.core import RAGEngine
 from rag_engine.config import RAGEngineConfig
 
-# 创建引擎
-config = RAGEngineConfig.from_env()
-engine = create_engine(config)
-
-# 处理文档
-doc = engine.process_document("path/to/document.pdf")
-
-# 查询
-result = engine.query("What is the main topic?")
+engine = RAGEngine(RAGEngineConfig.from_env())
+engine.process_document("report.pdf")
+result = engine.query("What is the main topic?", top_k=5)
 print(result.answer)
 ```
 
-## 📚 详细使用指南
+## Configuration
 
-### 1. 文档处理
+`RAGEngineConfig` is composed of typed dataclasses. All fields have environment-variable defaults.
 
-#### 单个文档
-```python
-doc = engine.process_document(
-    "report.pdf",
-    doc_id="report_001",
-    doc_title="Annual Report",
-    language="en"
-)
-```
+| Sub-config | Purpose | Key fields |
+|------------|---------|-----------|
+| `EmbeddingConfig` | Embedding provider | `model`, `dimension`, `api_key`, `base_url`, `use_azure`, `azure_*` |
+| `LLMConfig` | LLM for extraction & answering | `model`, `temperature`, `max_tokens`, `enable_cache`, `use_azure` |
+| `VisionConfig` | Vision model for PDF/image analysis | `model`, `provider` (`openai` / `azure` / `gemini`) |
+| `LanguageConfig` | Multilingual settings | `default_language`, `supported_languages` |
+| `PDFProcessingConfig` | Advanced PDF parsing | `use_advanced_layout`, `extract_images/tables/text`, `filter_header_footer`, `min_image_area` |
+| `ProcessingConfig` | Chunking & concurrency | `chunker_type` (`title` / `token`), `chunk_size`, `chunk_overlap`, `max_workers`, `max_entity_tokens` |
+| `BM25Config` | Full-text search | `enable_bm25`, `k1`, `b`, `language`, `min_token_length` |
+| `HybridRetrievalConfig` | Fusion strategy | `fusion_strategy`, `vector_weight`, `bm25_weight`, `graph_weight`, `normalization_method`, `rrf_k`, `enable_dedup` |
+| `RerankerConfig` | Reranker selection | `rerank_model` (`simple` / `cross-encoder` / `llm` / `hybrid`), `rerank_top_k`, `rerank_final_k` |
+| `StorageConfig` | Storage backend tuning | `cosine_threshold`, `related_chunk_number`, `max_graph_nodes` |
 
-#### 批量处理
-```python
-documents = engine.process_folder(
-    "documents/",
-    language="en",
-    recursive=True
-)
-```
-
-### 2. 多模态查询
-
-#### 基础查询
-```python
-result = engine.query(
-    "What are the key findings?",
-    top_k=5
-)
-```
-
-#### 异步查询
-```python
-result = await engine.aquery(
-    "What are the key findings?",
-    top_k=5
-)
-```
-
-### 3. 多语言处理
-
-```python
-from rag_engine.i18n import set_language
-
-# 切换语言
-set_language("zh")  # 中文
-set_language("en")  # 英文
-set_language("ja")  # 日文
-
-# 按特定语言处理文档
-doc = engine.process_document(
-    "chinese_doc.txt",
-    language="zh"
-)
-```
-
-### 4. 知识图谱操作
-
-```python
-# 获取知识图谱统计
-stats = engine.kg.get_stats()
-
-# 搜索实体
-entities = engine.kg.search_entities_by_name("AI")
-
-# 获取相关实体
-related = engine.kg.get_related_entities("entity_id")
-
-# 查找实体路径
-paths = engine.kg.get_entity_paths("start_id", "end_id")
-
-# 保存知识图谱
-engine.kg.save("kg.json")
-```
-
-### 5. 检索统计
-
-```python
-stats = engine.get_statistics()
-print(stats)
-# {
-#     'processed_documents': 10,
-#     'total_content_blocks': 150,
-#     'knowledge_graph': {...},
-#     'retriever': {...}
-# }
-```
-
-## 🏗️ 架构设计
-
-### 系统架构流程
-
-```
-文档输入 → 文档解析 → 内容处理 → 知识图谱 → 检索引擎 → 答案生成
-  ↓        ↓          ↓          ↓          ↓         ↓
-多格式    多解析器    多处理器    图构建     混合检索   LLM集成
-支持      器         器          和索引     器
-```
-
-### 核心模块
-
-1. **parsers/** - 文档解析
-   - `PDFParser`: PDF 解析
-   - `DocxParser`: Word 文档解析
-   - `ExcelParser`: Excel 表格解析
-   - `ImageParser`: 图像处理
-   - `TextParser`: 纯文本解析
-
-2. **processors/** - 内容处理
-   - `TextProcessor`: 文本处理
-   - `ImageProcessor`: 图像分析
-   - `TableProcessor`: 表格解析
-   - `EquationProcessor`: 公式处理
-   - `CodeProcessor`: 代码分析
-
-3. **core/** - 核心引擎
-   - `RAGEngine`: 主引擎
-   - `KnowledgeGraph`: 知识图谱
-   - `EntityExtractor`: 实体提取
-   - `RelationshipBuilder`: 关系构建
-
-4. **retrieval/** - 检索系统
-   - `HybridRetriever`: 混合检索
-   - `OpenAIEmbedding`: 文本嵌入
-   - 向量相似度搜索
-
-5. **i18n/** - 国际化
-   - 多语言支持
-   - 自定义翻译
-
-## 📋 API 参考
-
-### RAGEngine
-
-#### 核心方法
-
-```python
-# 处理单个文档
-process_document(file_path, doc_id, doc_title, language) -> Document
-
-# 批量处理文件夹
-process_folder(folder_path, language, recursive) -> List[Document]
-
-# 同步查询
-query(query, top_k, use_graph) -> QueryResult
-
-# 异步查询
-async aquery(query, top_k, use_graph) -> QueryResult
-
-# 获取统计信息
-get_statistics() -> Dict
-
-# 保存引擎状态
-save_state(output_dir) -> str
-```
-
-### QueryResult
-
-```python
-@dataclass
-class QueryResult:
-    query: str                          # 原始查询
-    answer: str                         # 生成的答案
-    retrieved_docs: List[RetrievalResult]  # 检索结果
-    sources: List[str]                  # 信息来源
-    confidence: float                   # 置信度
-    reasoning: Optional[str]            # 推理过程
-    multimodal_analysis: Optional[Dict] # 多模态分析结果
-```
-
-## 🧪 测试
-
+### Environment variables (essential)
 ```bash
-# 运行所有测试
-pytest tests/
-
-# 运行特定测试
-pytest tests/test_parsers.py
-
-# 查看覆盖率
-pytest --cov=rag_engine tests/
-```
-
-## 📝 示例
-
-### 1. 基础示例
-```bash
-python examples/basic_example.py
-```
-
-### 2. 多模态处理
-```bash
-python examples/multimodal_example.py
-```
-
-### 3. 多语言支持
-```bash
-python examples/multilingual_example.py
-```
-
-## 🔧 配置项
-
-### 环境变量
-
-```bash
-# OpenAI API
-OPENAI_API_KEY=xxx
+# OpenAI / DeepBricks
+OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://api.openai.com/v1
 
-# Gemini Vision API (可选)
-VISION_PROVIDER=gemini          # 或 "openai"（默认）
-GEMINI_API_KEY=AIza...          # Gemini API 密钥
+# Azure OpenAI (optional master switch)
+USE_AZURE_OPENAI=true
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
+AZURE_OPENAI_API_VERSION=2024-08-01-preview
+AZURE_OPENAI_LLM_DEPLOYMENT=gpt-4o
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
+AZURE_OPENAI_VISION_DEPLOYMENT=gpt-4o
 
-# 模型配置
+# Gemini Vision (optional)
+VISION_PROVIDER=gemini
+GEMINI_API_KEY=AIza...
+
+# Models
 EMBEDDING_MODEL=text-embedding-3-large
+EMBEDDING_DIM=3072
 LLM_MODEL=gpt-4o-mini
 LLM_TEMPERATURE=0.7
 
-# 存储设置
+# Workdirs
 WORKING_DIR=./rag_storage
 OUTPUT_DIR=./output
 
-# 处理配置
+# Chunking & retrieval
+CHUNKER_TYPE=title           # 'title' or 'token'
 CHUNK_SIZE=1024
 CHUNK_OVERLAP=200
-MAX_WORKERS=4
-ENABLE_MULTIMODAL=true
+ENABLE_BM25=true
+FUSION_STRATEGY=weighted_avg # 'weighted_avg' | 'rrf' | 'max' | 'min'
+VECTOR_WEIGHT=0.5
+BM25_WEIGHT=0.5
+ENABLE_RERANK=true
+RERANK_MODEL=simple          # 'simple' | 'cross-encoder' | 'llm' | 'hybrid'
 
-# 语言设置
 LANGUAGE=en
 ```
 
-### Vision 模型支持
+## Other Examples
 
-本项目支持多种 Vision API 提供商用于 PDF 图像分析和多模态处理：
+| File | Demonstrates |
+|------|--------------|
+| `examples/hybrid_pdf_rag_chroma_kuzu.py` | **Featured** — full modular pipeline with 4 toggleable workflows |
 
-#### OpenAI Vision (默认)
+## Module Map
+
+```
+rag_engine/
+├── core/          # RAGEngine orchestrator, KnowledgeGraph, EntityExtractor, RelationshipBuilder, prompts, llm_client
+├── pipeline/      # DocumentProcessor, KnowledgeBaseBuilder, KnowledgeGraphBuilder, RetrievalPipeline, chunker
+├── storage/       # ChromaKnowledgeBase, KuzuGraphStore
+├── retrieval/     # OpenAIEmbedding, HybridRetriever, BM25Retriever, ScoreNormalizer, HybridFuser,
+│                  # SimpleReranker / LLMReranker / CrossEncoderReranker / HybridReranker, ContextExtractor
+├── parsers/       # BaseParser, PDFParser, DocxParser, ExcelParser, ImageParser, TextParser,
+│                  # AdvancedPDFProcessor, ParserFactory
+├── processors/    # BaseModalProcessor, TextProcessor, ImageProcessor, TableProcessor,
+│                  # EquationProcessor, CodeProcessor, ProcessorFactory
+├── i18n/          # I18n, LanguageDetector, MultilingualEmbedding, CrosslingualRetrieval
+├── config.py      # RAGEngineConfig + sub-configs
+└── types.py       # ContentType, ModalityType, ContentBlock, Document, Chunk, Entity, Relationship, RetrievalResult, QueryResult
+```
+
+## Extending
+
+### New file format
+1. Subclass `BaseParser` in `rag_engine/parsers/`
+2. Implement `parse()` and `supports()`
+3. Register in `ParserFactory`
+
+### New modality
+1. Subclass `BaseModalProcessor` in `rag_engine/processors/`
+2. Implement `process()` and `supports()`
+3. Register in `ProcessorFactory`
+
+### New storage backend
+1. Mirror the public surface of `ChromaKnowledgeBase` (`rebuild`, `search`, `count`, `get_all`) or `KuzuGraphStore`
+2. Update the corresponding `KnowledgeBaseBuilder.rebuild_*()` / `KnowledgeGraphBuilder.store_*()` calls
+
+### New retrieval / fusion strategy
+Add a method to `RetrievalPipeline` or extend `HybridFuser` in `rag_engine/retrieval/`.
+
+## Testing
 ```bash
-VISION_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-# 使用 GPT-4V、GPT-4o 等模型
+pytest tests/
+pytest --cov=rag_engine tests/
 ```
 
-#### Google Gemini Vision
-```bash
-VISION_PROVIDER=gemini
-GEMINI_API_KEY=AIza...
-# 使用 Gemini 2.5 Flash、Gemini Pro Vision 等模型
-```
-
-**快速开始 Gemini**:
-```bash
-pip install google-generativeai
-python test_gemini_config.py
-python examples/gemini_pdf_rag_example.py
-```
-
-详见：[Gemini Vision Setup Guide](GEMINI_VISION_SETUP.md) 和 [实现总结](GEMINI_IMPLEMENTATION_SUMMARY.md)
-
-## 🎨 定制化
-
-### 自定义处理器
-
-```python
-from rag_engine.processors import BaseModalProcessor
-
-class CustomProcessor(BaseModalProcessor):
-    def supports(self, content_type):
-        return content_type == ContentType.CUSTOM
-    
-    def process(self, block):
-        # 自定义处理逻辑
-        description = "..."
-        entity = Entity(...)
-        return description, entity
-```
-
-### 自定义翻译
-
-```python
-from rag_engine.i18n import get_i18n
-
-i18n = get_i18n()
-i18n.add_language("custom", {
-    "key1": "value1",
-    "key2": "value2"
-})
-```
-
-## 📊 功能对比
-
-| 功能 | RAG-Anything | RAG Engine |
-|------|-------------|-----------|
-| 多模态处理 | ✅ | ✅ |
-| 知识图谱 | ✅ | ✅ |
-| 混合检索 | ✅ | ✅ |
-| 多语言支持 | ⚠️ | ✅ |
-| LLamaIndex 基础 | ❌ | ✅ |
-| 无前端 | ✅ | ✅ |
-| 易于扩展 | ⚠️ | ✅ |
-
-## 🤝 扩展指南
-
-### 添加新的文档格式
-
-1. 在 `parsers/` 中创建新的解析器类
-2. 继承 `BaseParser`
-3. 实现 `parse()` 和 `supports()` 方法
-4. 在 `ParserFactory` 中注册
-
-### 添加新的处理器
-
-1. 在 `processors/` 中创建新的处理器类
-2. 继承 `BaseModalProcessor`
-3. 实现 `process()` 和 `supports()` 方法
-4. 在 `ProcessorFactory` 中注册
-
-## 📄 许可证
-
+## License
 MIT
-
-## 🙋 支持
-
-如有问题或建议，欢迎提交 Issue 或 PR。
